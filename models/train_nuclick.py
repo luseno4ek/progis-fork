@@ -461,11 +461,14 @@ def get_filenames_from_folder(folder_path):
 # val_masks_dir = "/data_nas/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/Train_val_step256_no_filling/val/tumor/mask_npy"
 # val_signal_dir = '/data_nas/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/Train_val_step256_no_filling/val/tumor/signal_max_point_npy'
 
-path = "/data_nas2/gjs/ISF_pixel_level_data/Gastric_new"
+# ИЗМЕНЕННЫЕ ПУТИ ДЛЯ ТЕСТИРОВАНИЯ НА МАЛОМ ДАТАСЕТЕ (ПАТЧИ 512x512)
+path = "/Users/olesyaindychko/Documents/phd/code/ProGIS/data/patches"
 i = 1
-cls = 'all_class'
-for i in range(1,4):
-    
+cls = 'tumor'  # изменено с 'all_class' на 'tumor'
+
+# Убран цикл for i in range(1,4) - тестируем только на fold_1
+if True:  # оставлено для сохранения отступов
+
     train_images_dir = f"{path}/fold_{i}/train/{cls}/image_npy"
     train_masks_dir = f"{path}/fold_{i}/train/{cls}/mask_npy"
     train_signal_dir = f'{path}/fold_{i}/train/{cls}/signal_all_line_npy'
@@ -487,8 +490,9 @@ for i in range(1,4):
     # 创建自定义数据集类的实例
     train_dataset = CustomDataset(train_images_dir, train_masks_dir, train_signal_dir, train_filenames)
     val_dataset = CustomDataset(val_images_dir, val_masks_dir, val_signal_dir, val_filenames)
-    train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True ,  num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=12,shuffle=False,  num_workers=4)
+    # ИЗМЕНЕНО для теста: batch_size=4, num_workers=0 (для macOS)
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)
     # 创建模型实例
     # model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False).cuda()
     model = MultiScaleResUnet(in_channels=5, num_classes=1)
@@ -498,9 +502,10 @@ for i in range(1,4):
     loss_fn = nn.BCELoss()
 
     # Training function
-    def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50):
+    def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs=50):
         best_dice = 0.0
-        device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+        # ИЗМЕНЕНО: device='cpu' для macOS (или 'cuda:0' если есть GPU)
+        device = 'cpu'  # изменено с 'cuda:1'
         model.to(device)
 
         for epoch in range(epochs):
@@ -637,11 +642,15 @@ for i in range(1,4):
             if dice_score > best_dice:
                 best_dice = dice_score
                 print("best dice result: ",best_dice)
-                os.makedirs(f'/data_nas2/gjs/ISF_pixel_level_data/Gastric_new/fold_{i}/nuclick_results/', exist_ok=True)
-                torch.save(model.state_dict(), f'/data_nas2/gjs/ISF_pixel_level_data/Gastric_new/fold_{i}/nuclick_results/nuclick_512_100epoch_best.pth')
+                # ИЗМЕНЕНО: сохранение в локальную директорию
+                checkpoint_dir = f'{path}/checkpoints/fold_{i}'
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                torch.save(model.state_dict(), f'{checkpoint_dir}/best_model_dice_{best_dice:.4f}_epoch_{epoch+1}.pth')
+                print(f'✓ Модель сохранена: {checkpoint_dir}/best_model_dice_{best_dice:.4f}_epoch_{epoch+1}.pth')
 
     print(f"fold_{i}_{cls}.")
-    train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=100)
+    # ИЗМЕНЕНО: epochs=3 для быстрого теста (вместо 100)
+    train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs=3)
     # print("模型：", model.__class__.__name__)
 
 

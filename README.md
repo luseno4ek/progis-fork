@@ -1,363 +1,330 @@
 # ProGIS: Prototype-Guided Interactive Segmentation for Pathological Images
 
-Неофициальная версия репозитория для воспроизведения результатов статьи "ProGIS: Prototype-Guided Interactive Segmentation for Pathological Images".
+Неофициальная версия репозитория для воспроизведения результатов статьи:
+> Ge et al., "ProGIS: Prototype-Guided Interactive Segmentation for Pathological Images", IEEE Transactions on Medical Imaging, 2025. DOI: 10.1109/TMI.2025.3611123
 
-## 📋 Описание
+## Описание
 
-ProGIS - это метод интерактивной сегментации патологических изображений, основанный на трех основных этапах:
+ProGIS - метод интерактивной сегментации патологических изображений, который идентифицирует **все связанные компоненты одного класса за одно взаимодействие** благодаря механизму прототипов.
 
-1. **Prototype Initialization** - Инициализация прототипов с генерацией направляющих сигналов
-2. **Prototype Navigation** - Навигация по прототипам с выделением ROI (256×256)
-3. **Local Refinement** - Локальная доработка через итеративную корректировку
+Фреймворк состоит из трёх модулей:
 
-## 🏗️ Архитектура
+1. **Prototype Initialization** — P-RoISeg сегментирует ROI вокруг первого интерактивного сигнала; выход используется как прототип категории
+2. **Prototype Navigation** — Feature Extractor извлекает pixel-level features; по сходству с прототипом находятся все связанные компоненты того же класса
+3. **Local Refinement** — тот же P-RoISeg уточняет ошибочные регионы по дополнительным корректирующим сигналам
 
-Основная модель: **MultiScaleResUnet**
-- Backbone: ResNet-based U-Net
-- Входы: 5 каналов (3 RGB + 2 guiding signals)
-- Выходы: 1 канал (бинарная маска сегментации)
-- Многомасштабные сверточные блоки (kernels: 3×3, 5×5, 7×7)
+## Архитектуры моделей
 
-## 📦 Установка
+### ProGIS (основной метод)
 
-### 1. Клонирование репозитория
+| Модуль | Архитектура | Входные каналы | Файл обучения |
+|--------|-------------|----------------|---------------|
+| P-RoISeg (Init + Refinement) | EfficientUNet-B0, `backbone=False` | 6 (RGB + prev_mask + fg_signal + bg_signal) | `train_roi_efficientunet_BCSS.py` |
+| Feature Extractor (Navigation) | EfficientUNet-B0, `backbone=True` | 3 (RGB) | `backbone_efficientunet_train.py` |
+
+### NuClick (baseline для сравнения)
+
+| Архитектура | Входные каналы | Файл обучения |
+|-------------|----------------|---------------|
+| MultiScaleResUnet | 5 (RGB + fg_signal + bg_signal) | `train_nuclick.py` |
+
+> **Важно**: `train_nuclick.py` — это воспроизведение **baseline метода NuClick**, с которым сравнивается ProGIS в статье. Для воспроизведения ProGIS используйте файлы из раздела ниже.
+
+## Результаты из статьи (BCSS dataset, 50 эпох, 5-fold CV)
+
+| Метод | mDice@20 | mIoU@20 | mNoI@85 |
+|-------|----------|---------|---------|
+| NuClick | 83.16 | 70.20 | — |
+| ProGIS+ResNet18 | **89.70** | **83.08** | **8.64** |
+| ProGIS+EfficientNet-B0 | 89.27 | 82.32 | 9.02 |
+
+## Установка
 
 ```bash
+# Клонирование
 git clone <repository-url>
 cd ProGIS
-```
 
-### 2. Создание виртуального окружения
-
-```bash
-# Создание venv
+# Виртуальное окружение
 python3 -m venv venv
+source venv/bin/activate  # macOS/Linux
 
-# Активация
-# macOS/Linux:
-source venv/bin/activate
-# Windows:
-venv\Scripts\activate
-```
-
-### 3. Установка зависимостей
-
-```bash
+# Зависимости
 pip install -r requirements.txt
 ```
 
-### Требования к системе
+**Требования**: Python 3.8+, 16GB RAM, GPU рекомендуется (обучение на CPU возможно, но медленно).
 
-- Python 3.8+
-- CUDA-compatible GPU (рекомендуется для обучения)
-- Минимум 16GB RAM
-- 50GB свободного места на диске (для датасетов)
+---
 
-## 📊 Подготовка данных
+## Подготовка данных
 
-### BCSS (Breast Cancer Semantic Segmentation)
+### Шаг 0. Скачать BCSS
 
-#### Структура датасета
+Датасет доступен на [BCSS Grand Challenge](https://bcsegmentation.grand-challenge.org/). Скачайте изображения (`.png`) и маски в папку `data/raw/`.
 
-Данные должны быть в формате `.npy` и организованы следующим образом:
+Для тестового запуска достаточно 3–5 изображений.
 
-```
-data/
-├── BCSS/
-│   ├── fold_1/
-│   │   ├── train/
-│   │   │   ├── tumor/              # или другой класс (stroma, inflammatory, etc.)
-│   │   │   │   ├── image_npy/      # RGB изображения [H, W, 3]
-│   │   │   │   ├── mask_npy/       # Бинарные маски [H, W]
-│   │   │   │   └── signal_all_line_npy/  # Скелетные сигналы [2, H, W]
-│   │   └── val/
-│   │       └── tumor/
-│   │           ├── image_npy/
-│   │           ├── mask_npy/
-│   │           └── signal_all_line_npy/
-│   ├── fold_2/
-│   └── fold_3/
+### Шаг 1. Конвертация PNG → NPY
+
+```bash
+python3 convert_bcss_to_npy.py \
+    --input_dir data/raw \
+    --output_dir data/processed \
+    --class_name tumor
 ```
 
-#### Классы BCSS
+Создаёт структуру `data/processed/fold_1/{train,val}/tumor/{image_npy,mask_npy,signal_all_line_npy}/`.
 
-- `tumor` - опухолевая ткань
-- `stroma` - строма
-- `inflammatory_infiltration` - воспалительная инфильтрация
-- `necrosis` - некроз
-- `others` - другие ткани
-- `all_class` - все классы вместе
+### Шаг 2. Нарезка на патчи 512×512
 
-#### Формат данных
+```bash
+python3 create_patches.py \
+    --input_dir data/processed \
+    --output_dir data/patches \
+    --patch_size 512 \
+    --stride 256 \
+    --class_name tumor
+```
 
-**image_npy**: Numpy array формата `[H, W, 3]` (uint8 или float32, значения 0-255 или 0-1)
+Создаёт 512×512 патчи со stride 256, как в статье. Также генерирует guiding signals.
 
-**mask_npy**: Numpy array формата `[H, W]` (бинарная маска: 0=фон, 1=объект)
+### Шаг 3. Генерация SLIC superpixels
 
-**signal_all_line_npy**: Numpy array формата `[2, H, W]`
-- Канал 0: Скелетный сигнал переднего плана
-- Канал 1: Скелетный сигнал фона
+> Требуется только для обучения Feature Extractor (ProGIS Stage 1).
 
-### Генерация направляющих сигналов
+```bash
+python3 generate_superpixels.py \
+    --input_dir data/patches \
+    --output_dir data/patches \
+    --n_segments 500 \
+    --class_name tumor
+```
 
-Если у вас есть только изображения и маски, вы можете сгенерировать сигналы с помощью функции `generateGuidingSignal()` из скриптов обучения:
+### Итоговая структура данных
+
+```
+data/patches/fold_1/
+├── train/
+│   ├── tumor/
+│   │   ├── image_npy/              # RGB патчи [H, W, 3]
+│   │   ├── mask_npy/               # Бинарные маски [H, W]
+│   │   └── signal_all_line_npy/    # Guiding signals [2, H, W]
+│   ├── Contrast_learning/
+│   │   ├── image_npy -> symlink
+│   │   ├── mask_npy -> symlink
+│   │   └── image_SLIC_500/         # SLIC superpixels [H, W]
+│   └── ROI_data/all_class/
+│       ├── image_npy -> symlink
+│       ├── mask_npy -> symlink
+│       └── signal_maxconnect_line_npy -> symlink
+└── val/
+    └── (аналогично)
+```
+
+Symlinks создаются автоматически скриптом `generate_superpixels.py` при наличии нужных директорий, либо вручную (см. раздел Troubleshooting).
+
+---
+
+## Обучение ProGIS
+
+### Stage 1: Feature Extractor (Prototype Navigation)
+
+Обучает backbone с contrastive learning на superpixel-level признаках.
+
+**Настройки в `models/backbone_efficientunet_train.py`:**
 
 ```python
-from scipy.ndimage.morphology import distance_transform_edt
-from skimage.morphology import skeletonize_3d
-import numpy as np
-
-def generateGuidingSignal(mask, signal_type='Skeleton'):
-    # Преобразование маски в бинарный формат
-    binary_mask = (mask > 0.5).astype(np.uint8)
-
-    # Distance transform
-    dist_transform = distance_transform_edt(binary_mask)
-
-    # Порог на основе среднего ± std
-    mean_dist = dist_transform.mean()
-    std_dist = dist_transform.std()
-    threshold = mean_dist + np.random.uniform(-std_dist, std_dist)
-
-    # Скелетизация
-    skeleton_mask = (dist_transform > threshold).astype(np.uint8)
-    skeleton = skeletonize_3d(skeleton_mask)
-
-    return skeleton.astype(np.float32)
+i = 1          # номер fold
+path = "/path/to/data/patches"
+# batch_size=2, num_workers=0  (для CPU/macOS)
+# batch_size=16, num_workers=4 (для GPU сервера)
+epochs = 50    # авторы обучали 50 эпох
 ```
 
-## 🚀 Запуск обучения
-
-### Этап 1: Prototype Initialization
-
-Обучение базовой модели на полных изображениях:
+**Запуск:**
 
 ```bash
 cd models
-python train_nuclick.py
+python3 backbone_efficientunet_train.py
 ```
 
-**Важные параметры в скрипте:**
+Чекпоинты сохраняются в `data/patches/fold_1/efficientUnet/`.
+
+### Stage 2: P-RoISeg (Prototype Initialization + Local Refinement)
+
+Обучает основную сегментационную сеть с CU-Training (2 forward pass → 1 backward pass).
+
+**Настройки в `models/train_roi_efficientunet_BCSS.py`:**
 
 ```python
-# Путь к данным (отредактируйте в train_nuclick.py, строки 464-474)
-path = "/path/to/your/BCSS"
-fold_num = 1  # номер fold (1-3)
-cls = 'tumor'  # класс для обучения
+i = 1          # номер fold
+path = "/path/to/data/patches"
+# batch_size=2, num_workers=0  (для CPU/macOS)
+# batch_size=42, num_workers=8 (для GPU сервера)
+epochs = 200   # авторы обучали 200 эпох
+```
 
-train_images_dir = f"{path}/fold_{fold_num}/train/{cls}/image_npy"
-train_masks_dir = f"{path}/fold_{fold_num}/train/{cls}/mask_npy"
-train_signal_dir = f"{path}/fold_{fold_num}/train/{cls}/signal_all_line_npy"
+**Запуск:**
 
-# Гиперпараметры
+```bash
+cd models
+python3 train_roi_efficientunet_BCSS.py
+```
+
+Чекпоинты сохраняются в `data/patches/fold_1/ROI_ckpt/`.
+
+### Порядок обучения
+
+```
+Stage 1 (Feature Extractor) → Stage 2 (P-RoISeg) → Inference
+```
+
+Оба этапа независимы, Stage 1 не нужен для запуска Stage 2.
+
+---
+
+## Обучение NuClick (baseline)
+
+> Только для воспроизведения baseline из статьи.
+
+**Настройки в `models/train_nuclick.py`:**
+
+```python
+path = "/path/to/data/patches"
+cls = 'tumor'
+# for i in range(1, 4):  # 3 folds
 batch_size = 12
-learning_rate = 4e-4
+device = 'cuda:1'  # или 'cpu'
 epochs = 100
-device = 'cuda:0'  # или 'cpu' если нет GPU
 ```
 
-### Этап 2: ROI-based Training
-
-Обучение модели на ROI (регионах интереса):
+**Запуск:**
 
 ```bash
-python train_roi_nuclick.py
+cd models
+python3 train_nuclick.py
 ```
 
-**Конфигурация:**
+---
 
-```python
-# ROI размер: 256×256
-# Модель: MultiScaleResUnet(in_channels=5, num_classes=1)
-# Loss: BCELoss
-# Optimizer: Adam (lr=4e-4)
-```
+## Параметры для разных конфигураций
 
-### Этап 3: Inference с итеративной корректировкой
+| Параметр | CPU (macOS) | GPU слабый (<8GB) | GPU мощный (≥16GB) |
+|----------|-------------|-------------------|---------------------|
+| batch_size | 2 | 4–8 | 16–42 |
+| num_workers | 0 | 2 | 4–8 |
+| device | `'cpu'` | `'cuda:0'` | `'cuda:0'` |
+| epochs (ProGIS) | 2–5 (тест) | 50–100 | 50–200 |
 
-```bash
-python inference_correction_new_BCSS_final.py
-```
+---
 
-**Что происходит:**
-1. Получение начальной сегментации
-2. Анализ ошибок (False Positives / False Negatives)
-3. Генерация новых guiding signals
-4. Уточнение сегментации в ROI
-5. Повторение до сходимости (Dice > 0.95)
-
-## 📁 Структура кода
-
-### Основные модули
+## Структура кода
 
 ```
 ProGIS/
 ├── models/
-│   ├── train_nuclick.py              # ЭТАП 1: Обучение базовой модели
-│   ├── train_roi_nuclick.py          # ЭТАП 2: ROI-based обучение
-│   ├── inference_correction_new_BCSS_final.py  # ЭТАП 3: Инференс
-│   ├── UNet.py                       # U-Net архитектура
-│   ├── efficientunet/                # EfficientUNet модели
-│   │   ├── efficientunet.py
-│   │   ├── efficientnet.py
-│   │   └── layers.py
-│   └── loss/
-│       └── loss.py                   # Dice Loss
-├── WSI_model/
-│   └── WSI_model_ROI_5_Lung.py       # Для WSI (Whole Slide Images)
-└── loss/
-    └── loss.py                       # Функции потерь
+│   ├── backbone_efficientunet_train.py   # ProGIS Stage 1: Feature Extractor
+│   ├── train_roi_efficientunet_BCSS.py   # ProGIS Stage 2: P-RoISeg (BCSS)
+│   ├── train_roi_efficientunet_final.py  # ProGIS Stage 2: финальная версия
+│   ├── train_nuclick.py                  # NuClick baseline
+│   ├── inference_correction_new_BCSS_final.py  # Инференс ProGIS
+│   ├── UNet.py                           # U-Net архитектура
+│   └── efficientunet/                    # EfficientUNet-B0
+│       ├── efficientunet.py              # backbone=True (3ch) / backbone=False (6ch)
+│       ├── efficientnet.py
+│       └── layers.py
+├── convert_bcss_to_npy.py    # PNG → NPY конвертер
+├── create_patches.py         # Нарезка на патчи 512×512
+├── generate_superpixels.py   # SLIC superpixels для Stage 1
+├── check_environment.py      # Проверка окружения
+├── requirements.txt
+└── data/
+    ├── raw/                  # Исходные PNG (не в git)
+    ├── processed/            # После convert_bcss_to_npy.py
+    └── patches/              # После create_patches.py + generate_superpixels.py
 ```
 
-### Ключевые функции по этапам
+---
 
-#### Этап 1: Prototype Initialization
-- `generateGuidingSignal()` - Генерация скелетных сигналов
-- `processMasks_signal()` - Пакетная обработка
-- `CustomDataset` - Загрузка данных
+## Troubleshooting
 
-#### Этап 2: Prototype Navigation
-- `ROI_crop()` - Выделение ROI 256×256
-- `ROI_crop_signal_line()` - Генерация сигналов в ROI
-- `get_largest_connected_component()` - Фильтрация компонент
+### Создание symlinks вручную
 
-#### Этап 3: Local Refinement
-- `processMasks()` - Анализ ошибок предсказания
-- Итеративный цикл уточнения
+Если `generate_superpixels.py` не создал symlinks:
 
-## 📊 Метрики
+```bash
+cd data/patches/fold_1
+for split in train val; do
+  # Stage 1
+  mkdir -p $split/Contrast_learning
+  ln -sf "$(pwd)/$split/tumor/image_npy" $split/Contrast_learning/image_npy
+  ln -sf "$(pwd)/$split/tumor/mask_npy" $split/Contrast_learning/mask_npy
 
-Основные метрики для оценки:
-
-- **Dice Coefficient**: > 0.95 (excellent), 0.85-0.95 (good)
-- **IoU** (Intersection over Union)
-- **Pixel Accuracy**
-
-## ⚙️ Конфигурация для разных GPU
-
-### Для слабого GPU (< 8GB VRAM):
-
-```python
-batch_size = 4
-num_workers = 2
-device = 'cuda:0'
-# Используйте смешанную точность (mixed precision)
+  # Stage 2
+  mkdir -p $split/ROI_data/all_class
+  ln -sf "$(pwd)/$split/tumor/image_npy" $split/ROI_data/all_class/image_npy
+  ln -sf "$(pwd)/$split/tumor/mask_npy" $split/ROI_data/all_class/mask_npy
+  ln -sf "$(pwd)/$split/tumor/signal_all_line_npy" \
+         $split/ROI_data/all_class/signal_maxconnect_line_npy
+done
 ```
 
-### Для мощного GPU (>= 16GB VRAM):
+### multiprocessing ошибка на macOS
 
 ```python
-batch_size = 12-16
-num_workers = 4-8
-device = 'cuda:0'
+# В DataLoader используйте:
+num_workers = 0
 ```
 
-### Для CPU (не рекомендуется):
+### backbone_efficientunet_train.py: 'float' has no attribute 'backward'
+
+Контрастный loss возвращает float вместо tensor, когда все патчи в батче фоновые.
+Решение: функция `get_fg_filenames()` уже добавлена в скрипт — фильтрует патчи без foreground.
+
+### train_roi_efficientunet_BCSS.py: wrong number of channels
 
 ```python
-batch_size = 1-2
-num_workers = 2
-device = 'cpu'
-# Обучение будет очень медленным
+# Убедитесь, что модель создана с backbone=False:
+model = get_efficientunet_b0(out_channels=1, concat_input=True,
+                              pretrained=False, backbone=False)
 ```
 
-## 🐛 Известные проблемы
-
-1. **Отсутствие предобученных весов**: Авторы не предоставили чекпоинты, нужно обучать с нуля
-2. **Hardcoded пути**: Многие пути к данным жестко заданы, нужно их редактировать
-3. **Зависимость от EfficientNet весов**: Путь `/home/gjs/ISF_nuclick/checkpoints/Efficientnet/efficientnet-b0-355c32eb.pth` нужно заменить на загрузку из torchvision
-
-## 📝 Быстрый старт для тестирования
-
-1. **Подготовьте минимальный датасет** (10-20 изображений для быстрой проверки)
-2. **Отредактируйте пути в `train_nuclick.py`** (строки 464-474)
-3. **Уменьшите количество эпох** для тестового запуска:
-   ```python
-   epochs = 5  # вместо 100
-   ```
-4. **Запустите обучение**:
-   ```bash
-   cd models
-   python train_nuclick.py
-   ```
-
-## 📚 Датасеты
-
-### BCSS Dataset
-
-**Источник**: [BCSS - Grand Challenge](https://bcsegmentation.grand-challenge.org/)
-
-**Описание**:
-- 151 WSI изображения рака молочной железы
-- 5 классов тканей
-- Разрешение: 0.25 µm/pixel
-
-**Скачивание**: Требуется регистрация на Grand Challenge
-
-### Другие поддерживаемые датасеты
-
-- **Gastric**: Гастрические образцы
-- **Lung**: Легочные ткани (WSI)
-
-## 🔧 Troubleshooting
-
-### Ошибка: "CUDA out of memory"
+### Ошибка FileNotFoundError: efficientnet weights
 
 ```python
-# Уменьшите batch_size
-batch_size = 4  # или даже 2
-
-# Уменьшите размер изображений
-# Используйте gradient checkpointing
-```
-
-### Ошибка: "FileNotFoundError: efficientnet weights"
-
-```python
-# В models/efficientunet/efficientnet.py (строка 191)
-# Замените на:
+# В models/efficientunet/efficientnet.py замените путь на:
 from torch.hub import load_state_dict_from_url
-pretrained_state_dict = load_state_dict_from_url(
+state_dict = load_state_dict_from_url(
     'https://github.com/lukemelas/EfficientNet-PyTorch/releases/download/1.0/efficientnet-b0-355c32eb.pth'
 )
 ```
 
-### Ошибка импорта модулей
+---
 
-```python
-# Убедитесь, что вы находитесь в директории models/
-cd models
-python train_nuclick.py
+## Известные проблемы
 
-# Или добавьте путь к PYTHONPATH
-export PYTHONPATH="${PYTHONPATH}:/path/to/ProGIS/models"
-```
-
-## 📖 Цитирование
-
-Если вы используете этот код, пожалуйста, цитируйте оригинальную статью:
-
-```bibtex
-@article{progis2024,
-  title={ProGIS: Prototype-Guided Interactive Segmentation for Pathological Images},
-  author={Authors},
-  journal={Journal},
-  year={2024}
-}
-```
-
-## 📧 Контакты
-
-Для вопросов и обсуждений:
-- Original Paper: [ссылка на статью]
-- Issues: GitHub Issues в этом репозитории
-
-## 📄 Лицензия
-
-См. LICENSE файл (если есть)
+- **Нет предобученных весов**: авторы не предоставили чекпоинты, нужно обучать с нуля
+- **Hardcoded пути**: многие пути к данным и чекпоинтам жёстко заданы, требуют правки
+- **DeprecationWarning**: `scipy.ndimage.morphology` и `skeletonize_3d` устарели, но работают
 
 ---
 
-**Примечание**: Это неофициальная версия для воспроизведения результатов. Оригинальный код предоставлен авторами без предобученных весов и детальной документации.
+## Цитирование
 
-**Статус**: 🚧 В разработке - тестирование на BCSS датасете
+```bibtex
+@article{ge2025progis,
+  title={ProGIS: Prototype-Guided Interactive Segmentation for Pathological Images},
+  author={Ge, Jiusong and Zhang, Di and Zhan, Yingkang and Liu, Jiashuai and
+          Gong, Tieliang and Wu, Jialun and Crispin-Ortuzar, Mireia and
+          Li, Chen and Gao, Zeyu},
+  journal={IEEE Transactions on Medical Imaging},
+  year={2025},
+  doi={10.1109/TMI.2025.3611123}
+}
+```
+
+---
+
+**Статус**: воспроизведение pipeline подтверждено на 3 BCSS изображениях (87 train + 348 val патчей).
+Для воспроизведения метрик из статьи требуется полный BCSS датасет и GPU сервер.

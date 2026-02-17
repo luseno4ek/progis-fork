@@ -518,10 +518,10 @@ def get_filenames_from_folder(folder_path):
     return [filename for filename in os.listdir(folder_path) if filename.endswith('.npy')]    
     
 
-i = 4
+i = 1  # fold_1 for local dataset
 
 # 设置训练集和验证集的文件夹路径
-path = "/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI"
+path = "/Users/olesyaindychko/Documents/phd/code/ProGIS/data/patches"
 
 train_images_dir = f"{path}/fold_{i}/train/ROI_data/all_class/image_npy"
 train_masks_dir = f"{path}/fold_{i}/train/ROI_data/all_class/mask_npy"
@@ -554,13 +554,14 @@ val_dataset = CustomDataset(val_images_dir, val_masks_dir, val_signal_dir, val_f
 
 
 
-train_loader = DataLoader(train_dataset, batch_size=42, shuffle=True ,  num_workers=8)
-val_loader = DataLoader(val_dataset, batch_size=42, shuffle=False,  num_workers=8)
+train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
 
 
 
-# 创建模型实例
-model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False).cuda()
+# 创建模型实例 - P-RoISeg uses backbone=False for 6-channel input (RGB+prev_mask+fg_signal+bg_signal)
+device = 'cpu'  # use CPU on macOS without GPU
+model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False, backbone=False).to(device)
 
 # model = MultiScaleResUnet(in_channels=5, num_classes=1)
 
@@ -737,7 +738,10 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         # # Save the best model
         if dice_score > best_dice:
             best_dice = dice_score
-            torch.save(model.state_dict(), f'{path}/fold_{i}/ROI_ckpt_35/BCSS_effi-Unet_roi_best_1+1_threod_allmask.pth')
+            checkpoint_dir = f'{path}/fold_{i}/ROI_ckpt'
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            torch.save(model.state_dict(), f'{checkpoint_dir}/BCSS_effi-Unet_roi_best_dice{best_dice:.4f}_epoch{epoch+1}.pth')
+            print(f"Best dice: {best_dice:.4f}")
 
 
 
@@ -745,7 +749,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
 print(train_images_dir)
 print("fold:",i)
 
-train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=200)
+train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=2)
 
 
 

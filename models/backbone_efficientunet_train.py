@@ -355,13 +355,23 @@ class CustomDataset(torch.utils.data.Dataset):
         image = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32)  # (channels, height, width)
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # (1, height, width)
         # signal = torch.tensor(signal.transpose(2, 0, 1), dtype=torch.float32)  # (channels, height, width)
-        suppixel = torch.tensor(suppixel.transpose(2, 0, 1), dtype=torch.float32)  # (1, height, width)
+        suppixel = torch.tensor(suppixel, dtype=torch.float32).unsqueeze(0)  # (1, height, width)
 
         return image, mask, suppixel
     
 # 获取文件夹中的文件名
 def get_filenames_from_folder(folder_path):
-    return [filename for filename in os.listdir(folder_path) if filename.endswith('.npy')]   
+    return [filename for filename in os.listdir(folder_path) if filename.endswith('.npy')]
+
+# Filter out background-only patches (required for contrastive learning)
+def get_fg_filenames(images_dir, masks_dir):
+    filenames = get_filenames_from_folder(images_dir)
+    fg_filenames = []
+    for f in filenames:
+        mask = np.load(os.path.join(masks_dir, f))
+        if mask.sum() > 0:  # keep only patches with foreground
+            fg_filenames.append(f)
+    return fg_filenames   
 
 
 # 设置训练集和验证集的文件夹路径
@@ -373,10 +383,9 @@ def get_filenames_from_folder(folder_path):
 # val_masks_dir = "/data_nas/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/Contrast_learning/mask_npy"
 # val_superpixel_dir = '/data_nas/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/Contrast_learning/image_SLIC_600'
 
-i = 5
+i = 1  # fold_1 for local dataset
 
-path = "/data_nas2/gjs/ISF_pixel_level_data/Gastric_new"
-# path = '/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI'
+path = "/Users/olesyaindychko/Documents/phd/code/ProGIS/data/patches"
 
 train_images_dir = f"{path}/fold_{i}/train/Contrast_learning/image_npy"
 train_masks_dir = f"{path}/fold_{i}/train/Contrast_learning/mask_npy"
@@ -386,9 +395,11 @@ val_images_dir = f"{path}/fold_{i}/val/Contrast_learning/image_npy"
 val_masks_dir = f"{path}/fold_{i}/val/Contrast_learning/mask_npy"
 val_superpixel_dir = f'{path}/fold_{i}/val/Contrast_learning/image_SLIC_500'
 
-# 获取训练集和验证集的文件名
-train_filenames = get_filenames_from_folder(train_images_dir)
-val_filenames = get_filenames_from_folder(val_images_dir)
+# 获取训练集和验证集的文件名 (foreground patches only for contrastive learning)
+train_filenames = get_fg_filenames(train_images_dir, train_masks_dir)
+val_filenames = get_fg_filenames(val_images_dir, val_masks_dir)
+print(f"Train patches with foreground: {len(train_filenames)}")
+print(f"Val patches with foreground: {len(val_filenames)}")
 
 # 创建自定义数据集类的实例
 train_dataset = CustomDataset(train_images_dir, train_masks_dir, train_superpixel_dir, train_filenames)
@@ -400,7 +411,8 @@ val_dataset = CustomDataset(val_images_dir, val_masks_dir, val_superpixel_dir, v
 
 
 # 创建模型实例
-model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False).cuda()
+device = 'cpu'  # use CPU on macOS without GPU
+model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False).to(device)
 
 
 if multiGPU :
@@ -429,8 +441,8 @@ if multiGPU :
     # map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
     # model.load_state_dict(torch.load('/home/gjs/ISF_nuclick/checkpoints_new/contrast_learing/resnet18TCGABR-Rdnct3_spp_ss_dc_ALL.pth' , map_location=map_location), strict=False)
 else:
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
     
 
 
@@ -502,16 +514,17 @@ def train_model(model, train_loader, val_loader, optimizer, epochs=50):
                 # 更新最佳验证损失并保存最佳模型
                 if val_loss < best_val_loss :
                     best_val_loss = val_loss
-                    model_filename = f'{path}/fold_{i}/efficientUnet/efficientUnet_{epoch+1}_loss{val_loss}_best.pth'
+                    checkpoint_dir = f'{path}/fold_{i}/efficientUnet'
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    model_filename = f'{checkpoint_dir}/efficientUnet_{epoch+1}_loss{val_loss:.4f}_best.pth'
                     print(f"Epoch {epoch+1}: Model saved with lowest Val Loss: {val_loss:.4f}")
                     torch.save(model.state_dict(), model_filename)
                 else:
-                    model_filename = f'{path}/fold_{i}/efficientUnet/efficientUnet_{epoch+1}_loss{val_loss}.pth'
+                    checkpoint_dir = f'{path}/fold_{i}/efficientUnet'
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    model_filename = f'{checkpoint_dir}/efficientUnet_{epoch+1}_loss{val_loss:.4f}.pth'
                     print(f"Epoch {epoch+1}: Model saved with Val Loss: {val_loss:.4f}")
                     torch.save(model.state_dict(), model_filename)
 
-        # 清空缓存以防止显存溢出
-        torch.cuda.empty_cache()
-
-train_model(model, train_loader, val_loader, optimizer,  epochs=50)
+train_model(model, train_loader, val_loader, optimizer,  epochs=2)
 
