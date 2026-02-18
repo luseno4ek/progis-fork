@@ -1,346 +1,266 @@
 """
 Конвертация BCSS данных из PNG в NPY формат для ProGIS
-Создает бинарные маски для выбранного класса и генерирует guiding signals
+
+Создаёт 5-fold CV разбиение:
+  - 125 WSI, отсортированных по имени
+  - fold_k: val = WSI[k*25:(k+1)*25], train = остальные 100 WSI
+  - Для каждого WSI генерируются маски и сигналы для всех 5 классов
+
+Использование:
+  python convert_bcss_to_npy.py \
+      --images_dir data/raw/images \
+      --masks_dir  data/raw/masks \
+      --output_dir data/processed
+
+Структура выходных данных:
+  data/processed/
+    fold_1/ ... fold_5/
+      train/ val/
+        tumor/ stroma/ inflammatory_infiltration/ necrosis/ others/
+          image_npy/  mask_npy/  signal_all_line_npy/
 """
 
 import numpy as np
 from PIL import Image
 from pathlib import Path
 import argparse
-from scipy.ndimage.morphology import distance_transform_edt
-from skimage.morphology import skeletonize_3d
+from scipy.ndimage import distance_transform_edt
+from skimage.morphology import skeletonize
 
 
-# Маппинг классов BCSS
-CLASS_MAPPING = {
-    'outside_roi': 0,
-    'tumor': 1,
-    'stroma': 2,
-    'lymphocytic_infiltrate': 3,
-    'necrosis_or_debris': 4,
-    'glandular_secretions': 5,
-    'blood': 6,
-    'exclude': 7,
-    'metaplasia_NOS': 8,
-    'fat': 9,
-    'plasma_cells': 10,
-    'other_immune_infiltrate': 11,
-    'mucoid_material': 12,
-    'normal_acinus_or_duct': 13,
-    'lymphatics': 14,
-    'undetermined': 15,
-    'nerve': 16,
-    'skin_adnexa': 17,
-    'blood_vessel': 18,
-    'angioinvasion': 19,
-    'dcis': 20,
-    'other': 21
+# ── BCSS pixel label → ProGIS category ──────────────────────────────────────
+#
+# BCSS raw labels (pixel values in mask PNG):
+#   0  outside_roi            → ignored (not tissue)
+#   1  tumor
+#   2  stroma
+#   3  lymphocytic_infiltrate → inflammatory_infiltration
+#   4  necrosis_or_debris     → necrosis
+#   5-21 everything else      → others
+#
+# ProGIS paper: "5 categories: tumor, stroma, inflammatory infiltration,
+#                necrosis, and others"  (following [28])
+
+CLASSES = {
+    'tumor':                      [1],
+    'stroma':                     [2],
+    'inflammatory_infiltration':  [3],
+    'necrosis':                   [4],
+    'others':                     list(range(5, 22)),   # 5..21 inclusive
 }
 
+N_FOLDS  = 5
+VAL_SIZE = 25   # WSI per fold used as validation
 
-def generateGuidingSignal(mask, signal_type='Skeleton', seed=42):
+
+# ── signal generation ────────────────────────────────────────────────────────
+
+def generate_guiding_signal(binary_mask: np.ndarray, seed: int = 0) -> np.ndarray:
     """
-    Генерация направляющего сигнала из маски
-
-    Args:
-        mask: numpy array [H, W] с бинарной маской
-        signal_type: тип сигнала ('Skeleton')
-        seed: random seed
-
-    Returns:
-        skeleton: numpy array [H, W] со скелетным сигналом
+    Distance-transform skeleton signal from a binary mask [H, W].
+    Returns float32 array [H, W].
     """
     np.random.seed(seed)
-
-    # Преобразование в бинарный формат
-    binary_mask = (mask > 0.5).astype(np.uint8)
+    binary_mask = (binary_mask > 0.5).astype(np.uint8)
 
     if binary_mask.sum() == 0:
-        return np.zeros_like(mask, dtype=np.float32)
+        return np.zeros_like(binary_mask, dtype=np.float32)
 
-    # Distance transform
-    dist_transform = distance_transform_edt(binary_mask)
+    dist = distance_transform_edt(binary_mask)
+    nonzero = dist[dist > 0]
+    if len(nonzero) == 0:
+        return np.zeros_like(binary_mask, dtype=np.float32)
 
-    # Вычисление порога
-    nonzero_dist = dist_transform[dist_transform > 0]
-    if len(nonzero_dist) == 0:
-        return np.zeros_like(mask, dtype=np.float32)
+    mean_d, std_d = nonzero.mean(), nonzero.std()
+    thresh = max(0.0, float(np.random.uniform(mean_d - std_d, mean_d + std_d)))
 
-    mean_dist = nonzero_dist.mean()
-    std_dist = nonzero_dist.std()
+    skel_mask = (dist > thresh).astype(np.uint8)
+    if skel_mask.sum() == 0:
+        skel_mask = binary_mask
 
-    # Случайный порог
-    threshold = mean_dist + np.random.uniform(-std_dist, std_dist)
-    threshold = max(0, threshold)
-
-    # Создание маски для скелетизации
-    skeleton_mask = (dist_transform > threshold).astype(np.uint8)
-
-    # Скелетизация
-    if skeleton_mask.sum() > 0:
-        skeleton = skeletonize_3d(skeleton_mask)
-    else:
-        skeleton = skeleton_mask
-
+    skeleton = skeletonize(skel_mask)
     return skeleton.astype(np.float32)
 
 
-def create_binary_mask(multiclass_mask, target_class_id):
+# ── mask helpers ─────────────────────────────────────────────────────────────
+
+def make_binary_mask(multiclass_mask: np.ndarray, label_ids: list) -> np.ndarray:
+    """Return float32 binary mask: 1 where pixel ∈ label_ids, else 0."""
+    out = np.zeros(multiclass_mask.shape, dtype=np.float32)
+    for lid in label_ids:
+        out[multiclass_mask == lid] = 1.0
+    return out
+
+
+# ── 5-fold split ─────────────────────────────────────────────────────────────
+
+def make_5fold_splits(all_files: list, n_folds: int = 5) -> list:
     """
-    Создание бинарной маски для определенного класса
-
-    Args:
-        multiclass_mask: numpy array с мультиклассовой маской
-        target_class_id: ID класса для извлечения
-
-    Returns:
-        binary_mask: бинарная маска [H, W] (0 или 1)
+    Split sorted file list into n_folds groups.
+    Returns list of dicts: [{'train': [...], 'val': [...]}, ...]
     """
-    binary_mask = (multiclass_mask == target_class_id).astype(np.float32)
-    return binary_mask
+    files = sorted(all_files, key=lambda p: p.name)
+    n = len(files)
+    fold_size = n // n_folds
+
+    splits = []
+    for k in range(n_folds):
+        val_start = k * fold_size
+        val_end   = val_start + fold_size if k < n_folds - 1 else n  # last fold takes remainder
+        val_files   = files[val_start:val_end]
+        train_files = files[:val_start] + files[val_end:]
+        splits.append({'train': train_files, 'val': val_files})
+
+    return splits
 
 
-def resize_to_multiple_of_16(image, mask):
+# ── single WSI processing ────────────────────────────────────────────────────
+
+def process_wsi(img_file: Path, masks_dir: Path, out_base: Path,
+                wsi_idx: int, resize: bool) -> dict:
     """
-    Изменение размера до кратного 16 (для U-Net архитектуры)
-
-    Args:
-        image: RGB изображение
-        mask: маска
-
-    Returns:
-        resized_image, resized_mask
+    Process one WSI for all 5 classes.
+    Returns dict {class_name: True/False} indicating which classes were saved.
     """
-    h, w = image.shape[:2]
+    # Load image
+    image = np.array(Image.open(img_file).convert('RGB'))
 
-    # Находим ближайший размер, кратный 16
-    new_h = ((h + 15) // 16) * 16
-    new_w = ((w + 15) // 16) * 16
-
-    # Если размер уже кратен 16, ничего не делаем
-    if h == new_h and w == new_w:
-        return image, mask
-
-    # Resize с сохранением пропорций
-    from PIL import Image as PILImage
-
-    img_pil = PILImage.fromarray(image)
-    mask_pil = PILImage.fromarray((mask * 255).astype(np.uint8))
-
-    img_resized = img_pil.resize((new_w, new_h), PILImage.BILINEAR)
-    mask_resized = mask_pil.resize((new_w, new_h), PILImage.NEAREST)
-
-    return np.array(img_resized), (np.array(mask_resized) > 127).astype(np.float32)
-
-
-def process_bcss_images(
-    images_dir,
-    masks_dir,
-    output_dir,
-    target_class='tumor',
-    train_ratio=0.7,
-    resize=True
-):
-    """
-    Обработка BCSS изображений и конвертация в NPY формат
-
-    Args:
-        images_dir: директория с изображениями
-        masks_dir: директория с масками
-        output_dir: выходная директория
-        target_class: целевой класс для бинарной сегментации
-        train_ratio: доля для train (остальное в val)
-        resize: изменять ли размер до кратного 16
-    """
-    images_dir = Path(images_dir)
-    masks_dir = Path(masks_dir)
-    output_dir = Path(output_dir)
-
-    # Получаем ID класса
-    target_class_id = CLASS_MAPPING.get(target_class)
-    if target_class_id is None:
-        raise ValueError(f"Неизвестный класс: {target_class}")
-
-    print(f"\n{'='*60}")
-    print(f"КОНВЕРТАЦИЯ BCSS В NPY ФОРМАТ")
-    print(f"{'='*60}")
-    print(f"Входная директория изображений: {images_dir}")
-    print(f"Входная директория масок: {masks_dir}")
-    print(f"Выходная директория: {output_dir}")
-    print(f"Целевой класс: {target_class} (ID={target_class_id})")
-    print(f"Train/Val split: {train_ratio:.0%}/{1-train_ratio:.0%}")
-    print(f"Resize до кратного 16: {resize}")
-    print(f"{'='*60}\n")
-
-    # Получаем список изображений
-    image_files = sorted(list(images_dir.glob('*.png')))
-    print(f"Найдено изображений: {len(image_files)}\n")
-
-    if len(image_files) == 0:
-        print("⚠️  Изображения не найдены!")
-        return
-
-    # Разделение на train/val
-    num_train = max(1, int(len(image_files) * train_ratio))
-    train_files = image_files[:num_train]
-    val_files = image_files[num_train:]
-
-    print(f"Train: {len(train_files)} изображений")
-    print(f"Val: {len(val_files)} изображений\n")
-
-    # Создание структуры директорий
-    for split in ['train', 'val']:
-        for data_type in ['image_npy', 'mask_npy', 'signal_all_line_npy']:
-            dir_path = output_dir / 'fold_1' / split / target_class / data_type
-            dir_path.mkdir(parents=True, exist_ok=True)
-
-    # Обработка train данных
-    print("Обработка TRAIN данных:")
-    for i, img_file in enumerate(train_files):
-        process_single_image(
-            img_file,
-            masks_dir,
-            output_dir / 'fold_1' / 'train' / target_class,
-            target_class_id,
-            i,
-            resize
-        )
-
-    # Обработка val данных
-    print("\nОбработка VAL данных:")
-    for i, img_file in enumerate(val_files):
-        process_single_image(
-            img_file,
-            masks_dir,
-            output_dir / 'fold_1' / 'val' / target_class,
-            target_class_id,
-            i,
-            resize
-        )
-
-    print(f"\n{'='*60}")
-    print(f"✓ КОНВЕРТАЦИЯ ЗАВЕРШЕНА!")
-    print(f"{'='*60}")
-    print(f"\nСтруктура создана:")
-    print(f"  {output_dir}/fold_1/")
-    print(f"    ├── train/{target_class}/")
-    print(f"    │   ├── image_npy/")
-    print(f"    │   ├── mask_npy/")
-    print(f"    │   └── signal_all_line_npy/")
-    print(f"    └── val/{target_class}/")
-    print(f"        ├── image_npy/")
-    print(f"        ├── mask_npy/")
-    print(f"        └── signal_all_line_npy/")
-
-    print(f"\n{'='*60}")
-    print(f"СЛЕДУЮЩИЕ ШАГИ:")
-    print(f"{'='*60}")
-    print(f"1. Отредактируйте models/train_nuclick.py:")
-    print(f"   path = '{output_dir.absolute()}'")
-    print(f"   fold_num = 1")
-    print(f"   cls = '{target_class}'")
-    print(f"   epochs = 5  # Для быстрого теста")
-    print(f"   batch_size = 2  # Изображения большие!")
-    print(f"\n2. Запустите обучение:")
-    print(f"   cd models")
-    print(f"   python train_nuclick.py")
-    print(f"{'='*60}\n")
-
-
-def process_single_image(img_file, masks_dir, output_base, target_class_id, index, resize):
-    """Обработка одного изображения"""
-    # Загрузка изображения
-    image = np.array(Image.open(img_file))
-
-    # Загрузка соответствующей маски
+    # Load mask
     mask_file = masks_dir / img_file.name
     if not mask_file.exists():
-        print(f"  ⚠️  Маска не найдена для {img_file.name}, пропускаем")
-        return
+        print(f"    ⚠  mask not found for {img_file.name}, skipping")
+        return {}
 
-    multiclass_mask = np.array(Image.open(mask_file))
+    mc_mask = np.array(Image.open(mask_file))
 
-    # Создание бинарной маски
-    binary_mask = create_binary_mask(multiclass_mask, target_class_id)
-
-    # Проверка наличия целевого класса
-    if binary_mask.sum() == 0:
-        print(f"  ⚠️  {img_file.name}: класс {target_class_id} отсутствует, пропускаем")
-        return
-
-    # Resize если нужно
+    # Optional: resize to multiple of 16
     if resize:
-        image, binary_mask = resize_to_multiple_of_16(image, binary_mask)
+        image, mc_mask = resize_to_multiple16(image, mc_mask)
 
-    # Генерация сигналов
-    fg_signal = generateGuidingSignal(binary_mask, signal_type='Skeleton', seed=42+index)
-    bg_mask = 1 - binary_mask
-    bg_signal = generateGuidingSignal(bg_mask, signal_type='Skeleton', seed=43+index)
-    combined_signal = np.stack([fg_signal, bg_signal], axis=0)
+    filename = f"sample_{wsi_idx:04d}.npy"
+    saved = {}
 
-    # Сохранение
-    filename = f'sample_{index:04d}.npy'
+    for cls_name, label_ids in CLASSES.items():
+        binary_mask = make_binary_mask(mc_mask, label_ids)
 
-    np.save(output_base / 'image_npy' / filename, image)
-    np.save(output_base / 'mask_npy' / filename, binary_mask)
-    np.save(output_base / 'signal_all_line_npy' / filename, combined_signal)
+        if binary_mask.sum() == 0:
+            saved[cls_name] = False
+            continue  # class absent in this WSI
 
-    pixel_percentage = (binary_mask.sum() / binary_mask.size) * 100
-    print(f"  ✓ {img_file.name}")
-    print(f"    → {filename}")
-    print(f"    → Размер: {image.shape}, Класс: {pixel_percentage:.2f}% пикселей")
+        # Signals
+        fg_signal = generate_guiding_signal(binary_mask,      seed=wsi_idx * 10)
+        bg_mask   = 1.0 - (mc_mask > 0).astype(np.float32)   # all non-tissue as background
+        bg_signal = generate_guiding_signal(bg_mask,          seed=wsi_idx * 10 + 1)
+        signal    = np.stack([fg_signal, bg_signal], axis=0)  # [2, H, W]
+
+        # Output dirs
+        cls_dir = out_base / cls_name
+        (cls_dir / 'image_npy').mkdir(parents=True, exist_ok=True)
+        (cls_dir / 'mask_npy').mkdir(parents=True, exist_ok=True)
+        (cls_dir / 'signal_all_line_npy').mkdir(parents=True, exist_ok=True)
+
+        np.save(cls_dir / 'image_npy'           / filename, image)
+        np.save(cls_dir / 'mask_npy'            / filename, binary_mask)
+        np.save(cls_dir / 'signal_all_line_npy' / filename, signal)
+
+        saved[cls_name] = True
+
+    return saved
+
+
+def resize_to_multiple16(image: np.ndarray, mask: np.ndarray):
+    h, w = image.shape[:2]
+    new_h = ((h + 15) // 16) * 16
+    new_w = ((w + 15) // 16) * 16
+    if h == new_h and w == new_w:
+        return image, mask
+    img_pil  = Image.fromarray(image).resize((new_w, new_h), Image.BILINEAR)
+    mask_pil = Image.fromarray(mask.astype(np.uint8)).resize((new_w, new_h), Image.NEAREST)
+    return np.array(img_pil), np.array(mask_pil)
+
+
+# ── main pipeline ─────────────────────────────────────────────────────────────
+
+def convert_bcss(images_dir: str, masks_dir: str, output_dir: str,
+                 n_folds: int = 5, resize: bool = True):
+    images_dir = Path(images_dir)
+    masks_dir  = Path(masks_dir)
+    output_dir = Path(output_dir)
+
+    image_files = sorted(images_dir.glob('*.png'))
+    if not image_files:
+        raise FileNotFoundError(f"No PNG files found in {images_dir}")
+
+    print(f"\n{'='*60}")
+    print(f"BCSS → NPY  |  {n_folds}-fold CV")
+    print(f"{'='*60}")
+    print(f"Images : {images_dir}  ({len(image_files)} WSI)")
+    print(f"Masks  : {masks_dir}")
+    print(f"Output : {output_dir}")
+    print(f"Classes: {', '.join(CLASSES.keys())}")
+    print(f"{'='*60}\n")
+
+    splits = make_5fold_splits(image_files, n_folds)
+
+    for fold_idx, split in enumerate(splits):
+        fold_num = fold_idx + 1
+        print(f"\n── fold_{fold_num}  "
+              f"(train={len(split['train'])} WSI, val={len(split['val'])} WSI) ──")
+
+        for split_name in ('train', 'val'):
+            wsi_list = split[split_name]
+            out_base  = output_dir / f'fold_{fold_num}' / split_name
+
+            counts = {cls: 0 for cls in CLASSES}
+            for wsi_idx, img_file in enumerate(wsi_list):
+                saved = process_wsi(img_file, masks_dir, out_base, wsi_idx, resize)
+                for cls, ok in saved.items():
+                    if ok:
+                        counts[cls] += 1
+
+            print(f"  {split_name:5s}: " +
+                  "  ".join(f"{cls}={counts[cls]}" for cls in CLASSES))
+
+    print(f"\n{'='*60}")
+    print(f"✓ Done! Output: {output_dir}")
+    print(f"{'='*60}")
+    print(f"\nStructure:")
+    print(f"  {output_dir}/")
+    print(f"  ├── fold_1/ ... fold_{n_folds}/")
+    print(f"  │     ├── train/")
+    print(f"  │     │     ├── tumor/{{image_npy, mask_npy, signal_all_line_npy}}")
+    print(f"  │     │     ├── stroma/")
+    print(f"  │     │     ├── inflammatory_infiltration/")
+    print(f"  │     │     ├── necrosis/")
+    print(f"  │     │     └── others/")
+    print(f"  │     └── val/  (same structure)")
+    print(f"\nNext step:")
+    print(f"  python create_patches.py --input_dir {output_dir} "
+          f"--output_dir data/patches")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Конвертация BCSS данных из PNG в NPY формат'
+        description='Convert BCSS PNG to NPY with 5-fold CV split'
     )
-    parser.add_argument(
-        '--images_dir',
-        type=str,
-        default='data/images',
-        help='Директория с изображениями PNG'
-    )
-    parser.add_argument(
-        '--masks_dir',
-        type=str,
-        default='data/masks',
-        help='Директория с масками PNG'
-    )
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        default='data/processed',
-        help='Выходная директория для NPY файлов'
-    )
-    parser.add_argument(
-        '--target_class',
-        type=str,
-        default='tumor',
-        choices=list(CLASS_MAPPING.keys()),
-        help='Целевой класс для бинарной сегментации'
-    )
-    parser.add_argument(
-        '--train_ratio',
-        type=float,
-        default=0.7,
-        help='Доля данных для train (остальное в val)'
-    )
-    parser.add_argument(
-        '--no_resize',
-        action='store_true',
-        help='Не изменять размер изображений'
-    )
-
+    parser.add_argument('--images_dir', default='data/raw/images',
+                        help='Directory with WSI images (.png)')
+    parser.add_argument('--masks_dir',  default='data/raw/masks',
+                        help='Directory with annotation masks (.png)')
+    parser.add_argument('--output_dir', default='data/processed',
+                        help='Output directory for NPY files')
+    parser.add_argument('--n_folds',    type=int, default=5,
+                        help='Number of CV folds (default: 5)')
+    parser.add_argument('--no_resize',  action='store_true',
+                        help='Skip resize to multiple of 16')
     args = parser.parse_args()
 
-    process_bcss_images(
+    convert_bcss(
         args.images_dir,
         args.masks_dir,
         args.output_dir,
-        args.target_class,
-        args.train_ratio,
-        resize=not args.no_resize
+        n_folds=args.n_folds,
+        resize=not args.no_resize,
     )
 
 

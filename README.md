@@ -59,35 +59,61 @@ pip install -r requirements.txt
 
 ## Подготовка данных
 
+### 5-fold cross-validation
+
+Следуя статье: 125 WSI разбиваются на 5 фолдов по 25 изображений. В каждом фолде:
+- **train**: 100 WSI (4 группы)
+- **val**: 25 WSI (1 группа)
+
+Разбиение детерминированное: WSI сортируются по имени, затем нарезаются на 5 равных групп.
+
+### 5 классов тканей
+
+| Класс в ProGIS | BCSS label |
+|----------------|-----------|
+| `tumor` | 1 |
+| `stroma` | 2 |
+| `inflammatory_infiltration` | 3 (lymphocytic_infiltrate) |
+| `necrosis` | 4 (necrosis_or_debris) |
+| `others` | 5–21 (всё остальное) |
+
 ### Шаг 0. Скачать BCSS
 
-Датасет доступен на [BCSS Grand Challenge](https://bcsegmentation.grand-challenge.org/). Скачайте изображения (`.png`) и маски в папку `data/raw/`.
+Датасет доступен на [BCSS Grand Challenge](https://bcsegmentation.grand-challenge.org/). Скачайте изображения (`.png`) и маски:
 
-Для тестового запуска достаточно 3–5 изображений.
+```
+data/raw/
+├── images/   # RGB изображения WSI
+└── masks/    # Маски с pixel-level аннотацией (те же имена файлов)
+```
 
-### Шаг 1. Конвертация PNG → NPY
+### Шаг 1. Конвертация PNG → NPY + 5-fold split
 
 ```bash
 python3 convert_bcss_to_npy.py \
-    --input_dir data/raw \
-    --output_dir data/processed \
-    --class_name tumor
+    --images_dir data/raw/images \
+    --masks_dir  data/raw/masks \
+    --output_dir data/processed
 ```
 
-Создаёт структуру `data/processed/fold_1/{train,val}/tumor/{image_npy,mask_npy,signal_all_line_npy}/`.
+Создаёт `data/processed/fold_{1..5}/{train,val}/{5 классов}/{image_npy,mask_npy,signal_all_line_npy}/`.
 
 ### Шаг 2. Нарезка на патчи 512×512
 
 ```bash
 python3 create_patches.py \
-    --input_dir data/processed \
-    --output_dir data/patches \
-    --patch_size 512 \
-    --stride 256 \
-    --class_name tumor
+    --input_dir  data/processed \
+    --output_dir data/patches
 ```
 
-Создаёт 512×512 патчи со stride 256, как в статье. Также генерирует guiding signals.
+Для конкретного фолда или класса:
+```bash
+python3 create_patches.py \
+    --input_dir  data/processed \
+    --output_dir data/patches \
+    --folds 1 2 3 \
+    --classes tumor stroma
+```
 
 ### Шаг 3. Генерация SLIC superpixels
 
@@ -95,34 +121,36 @@ python3 create_patches.py \
 
 ```bash
 python3 generate_superpixels.py \
-    --input_dir data/patches \
-    --output_dir data/patches \
-    --n_segments 500 \
-    --class_name tumor
+    --input_dir  data/patches \
+    --output_dir data/patches
 ```
+
+Автоматически создаёт symlinks для Stage 1 и Stage 2.
 
 ### Итоговая структура данных
 
 ```
-data/patches/fold_1/
-├── train/
-│   ├── tumor/
-│   │   ├── image_npy/              # RGB патчи [H, W, 3]
-│   │   ├── mask_npy/               # Бинарные маски [H, W]
-│   │   └── signal_all_line_npy/    # Guiding signals [2, H, W]
-│   ├── Contrast_learning/
-│   │   ├── image_npy -> symlink
-│   │   ├── mask_npy -> symlink
-│   │   └── image_SLIC_500/         # SLIC superpixels [H, W]
-│   └── ROI_data/all_class/
-│       ├── image_npy -> symlink
-│       ├── mask_npy -> symlink
-│       └── signal_maxconnect_line_npy -> symlink
-└── val/
-    └── (аналогично)
+data/patches/
+├── fold_1/ ... fold_5/
+│   ├── train/
+│   │   ├── tumor/
+│   │   │   ├── image_npy/             # RGB патчи [H, W, 3]
+│   │   │   ├── mask_npy/              # Бинарные маски [H, W]
+│   │   │   └── signal_all_line_npy/   # Guiding signals [2, H, W]
+│   │   ├── stroma/   (аналогично)
+│   │   ├── inflammatory_infiltration/
+│   │   ├── necrosis/
+│   │   ├── others/
+│   │   ├── Contrast_learning/
+│   │   │   ├── image_npy -> symlink (→ tumor)
+│   │   │   ├── mask_npy  -> symlink (→ tumor)
+│   │   │   └── image_SLIC_500/        # SLIC superpixels [H, W]
+│   │   └── ROI_data/all_class/
+│   │       ├── image_npy -> symlink
+│   │       ├── mask_npy  -> symlink
+│   │       └── signal_maxconnect_line_npy -> symlink
+│   └── val/  (аналогично)
 ```
-
-Symlinks создаются автоматически скриптом `generate_superpixels.py` при наличии нужных директорий, либо вручную (см. раздел Troubleshooting).
 
 ---
 
