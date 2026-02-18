@@ -159,8 +159,14 @@ def convert_bcss(images_dir: str, masks_dir: str, output_dir: str,
 
     for wsi_idx, img_file in enumerate(image_files):
         stem = f'sample_{wsi_idx:04d}'
-        stems.append(stem)
         filename = f'{stem}.npy'
+
+        # Пропускаем уже обработанные WSI (resume при перезапуске)
+        img_dst = all_img_dir / filename
+        if img_dst.exists():
+            print(f"  [skip] {stem} already processed")
+            stems.append(stem)  # включаем в fold_splits
+            continue
 
         # Загрузка
         try:
@@ -181,8 +187,10 @@ def convert_bcss(images_dir: str, masks_dir: str, output_dir: str,
         if resize:
             image, mc_mask = resize_to_multiple16(image, mc_mask)
 
+        stems.append(stem)
+
         # Сохраняем изображение ОДИН раз
-        np.save(all_img_dir / filename, image.astype(np.float32))
+        np.save(img_dst, image.astype(np.float32))
 
         # Сохраняем маски и сигналы для каждого класса
         class_results = {}
