@@ -383,27 +383,21 @@ def get_fg_filenames(images_dir, masks_dir):
 # val_masks_dir = "/data_nas/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/Contrast_learning/mask_npy"
 # val_superpixel_dir = '/data_nas/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/Contrast_learning/image_SLIC_600'
 
-i = 1  # fold_1 for local dataset
+# ── Configuration ────────────────────────────────────────────────────────────
+FOLD        = 1
+PATCHES_DIR = "../data/patches"
+SPLITS_JSON = "../data/processed/fold_splits.json"
+CLS         = 'tumor'       # class used for contrastive learning
+N_SEGMENTS  = 500
+# ─────────────────────────────────────────────────────────────────────────────
 
-path = "/Users/olesyaindychko/Documents/phd/code/ProGIS/data/patches"
+from dataset import ContrastDataset
 
-train_images_dir = f"{path}/fold_{i}/train/Contrast_learning/image_npy"
-train_masks_dir = f"{path}/fold_{i}/train/Contrast_learning/mask_npy"
-train_superpixel_dir = f'{path}/fold_{i}/train/Contrast_learning/image_SLIC_500'
-
-val_images_dir = f"{path}/fold_{i}/val/Contrast_learning/image_npy"
-val_masks_dir = f"{path}/fold_{i}/val/Contrast_learning/mask_npy"
-val_superpixel_dir = f'{path}/fold_{i}/val/Contrast_learning/image_SLIC_500'
-
-# 获取训练集和验证集的文件名 (foreground patches only for contrastive learning)
-train_filenames = get_fg_filenames(train_images_dir, train_masks_dir)
-val_filenames = get_fg_filenames(val_images_dir, val_masks_dir)
-print(f"Train patches with foreground: {len(train_filenames)}")
-print(f"Val patches with foreground: {len(val_filenames)}")
-
-# 创建自定义数据集类的实例
-train_dataset = CustomDataset(train_images_dir, train_masks_dir, train_superpixel_dir, train_filenames)
-val_dataset = CustomDataset(val_images_dir, val_masks_dir, val_superpixel_dir, val_filenames)
+train_dataset = ContrastDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='train',
+                                cls=CLS, n_segments=N_SEGMENTS)
+val_dataset   = ContrastDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='val',
+                                cls=CLS, n_segments=N_SEGMENTS)
+print(f"Train patches: {len(train_dataset)}  Val patches: {len(val_dataset)}")
 
 
 
@@ -514,13 +508,13 @@ def train_model(model, train_loader, val_loader, optimizer, epochs=50):
                 # 更新最佳验证损失并保存最佳模型
                 if val_loss < best_val_loss :
                     best_val_loss = val_loss
-                    checkpoint_dir = f'{path}/fold_{i}/efficientUnet'
+                    checkpoint_dir = f'{PATCHES_DIR}/fold_{FOLD}/efficientUnet'
                     os.makedirs(checkpoint_dir, exist_ok=True)
                     model_filename = f'{checkpoint_dir}/efficientUnet_{epoch+1}_loss{val_loss:.4f}_best.pth'
                     print(f"Epoch {epoch+1}: Model saved with lowest Val Loss: {val_loss:.4f}")
                     torch.save(model.state_dict(), model_filename)
                 else:
-                    checkpoint_dir = f'{path}/fold_{i}/efficientUnet'
+                    checkpoint_dir = f'{PATCHES_DIR}/fold_{FOLD}/efficientUnet'
                     os.makedirs(checkpoint_dir, exist_ok=True)
                     model_filename = f'{checkpoint_dir}/efficientUnet_{epoch+1}_loss{val_loss:.4f}.pth'
                     print(f"Epoch {epoch+1}: Model saved with Val Loss: {val_loss:.4f}")

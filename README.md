@@ -61,9 +61,15 @@ pip install -r requirements.txt
 
 ### 5-fold cross-validation
 
-Следуя статье: 125 WSI разбиваются на 5 фолдов по 25 изображений. В каждом фолде:
-- **train**: 100 WSI (4 группы)
-- **val**: 25 WSI (1 группа)
+Статья использует 125 WSI (100 train + 25 val), однако полный BCSS содержит 151 WSI.
+Мы используем все доступные изображения — больше данных улучшает обобщение.
+
+При N WSI код автоматически разбивает на 5 равных групп (остаток уходит в fold_5):
+
+| N WSI | val на фолд | train на фолд |
+|-------|-------------|---------------|
+| 125 (статья) | 25 | 100 |
+| 151 (полный BCSS) | 30 (fold_5: 31) | 121 (fold_5: 120) |
 
 Разбиение детерминированное: WSI сортируются по имени, затем нарезаются на 5 равных групп.
 
@@ -129,28 +135,29 @@ python3 generate_superpixels.py \
 
 ### Итоговая структура данных
 
+Каждый файл хранится **ровно один раз**. Разбиение на фолды — в JSON, не в папках.
+
 ```
-data/patches/
-├── fold_1/ ... fold_5/
-│   ├── train/
-│   │   ├── tumor/
-│   │   │   ├── image_npy/             # RGB патчи [H, W, 3]
-│   │   │   ├── mask_npy/              # Бинарные маски [H, W]
-│   │   │   └── signal_all_line_npy/   # Guiding signals [2, H, W]
-│   │   ├── stroma/   (аналогично)
-│   │   ├── inflammatory_infiltration/
-│   │   ├── necrosis/
-│   │   ├── others/
-│   │   ├── Contrast_learning/
-│   │   │   ├── image_npy -> symlink (→ tumor)
-│   │   │   ├── mask_npy  -> symlink (→ tumor)
-│   │   │   └── image_SLIC_500/        # SLIC superpixels [H, W]
-│   │   └── ROI_data/all_class/
-│   │       ├── image_npy -> symlink
-│   │       ├── mask_npy  -> symlink
-│   │       └── signal_maxconnect_line_npy -> symlink
-│   └── val/  (аналогично)
+data/processed/                        ← после convert_bcss_to_npy.py
+  fold_splits.json                     ← {fold_1: {train:[...], val:[...]}, ...}
+  all/
+    image_npy/                         ← WSI изображения [H, W, 3] — один раз!
+  tumor/
+    mask_npy/                          ← маски только для класса tumor
+    signal_all_line_npy/               ← guiding signals [2, H, W]
+  stroma/  necrosis/  ...              ← аналогично для других классов
+
+data/patches/                          ← после create_patches.py
+  all/
+    image_npy/                         ← image-патчи — один раз!
+    slic_500/                          ← SLIC superpixels — один раз!
+  tumor/
+    mask_npy/                          ← только fg-патчи для tumor
+    signal_all_line_npy/
+  stroma/  necrosis/  ...
 ```
+
+> Экономия: раньше изображение сохранялось 5× (по числу классов). Теперь — 1×.
 
 ---
 

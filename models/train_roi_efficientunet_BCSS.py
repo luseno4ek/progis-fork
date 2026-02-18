@@ -518,18 +518,12 @@ def get_filenames_from_folder(folder_path):
     return [filename for filename in os.listdir(folder_path) if filename.endswith('.npy')]    
     
 
-i = 1  # fold_1 for local dataset
-
-# 设置训练集和验证集的文件夹路径
-path = "/Users/olesyaindychko/Documents/phd/code/ProGIS/data/patches"
-
-train_images_dir = f"{path}/fold_{i}/train/ROI_data/all_class/image_npy"
-train_masks_dir = f"{path}/fold_{i}/train/ROI_data/all_class/mask_npy"
-train_signal_dir = f'{path}/fold_{i}/train/ROI_data/all_class/signal_maxconnect_line_npy'
-
-val_images_dir = f"{path}/fold_{i}/val/ROI_data/all_class/image_npy"
-val_masks_dir = f"{path}/fold_{i}/val/ROI_data/all_class/mask_npy"
-val_signal_dir = f'{path}/fold_{i}/val/ROI_data/all_class/signal_maxconnect_line_npy'
+# ── Configuration ────────────────────────────────────────────────────────────
+FOLD        = 1
+PATCHES_DIR = "../data/patches"
+SPLITS_JSON = "../data/processed/fold_splits.json"
+CLS         = 'tumor'       # class to train on
+# ─────────────────────────────────────────────────────────────────────────────
 
 # train_images_dir = "/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/ROI_data/all_class/image_npy"
 # train_masks_dir = "/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/ROI_data/all_class/mask_npy"
@@ -540,22 +534,14 @@ val_signal_dir = f'{path}/fold_{i}/val/ROI_data/all_class/signal_maxconnect_line
 # val_signal_dir = '/data_nas2/gjs/ISF_pixel_level_data/Gastric/val/ROI_data/all_class/signal_maxconnect_line_npy'
 
 
-# 获取训练集和验证集的文件名
-train_filenames = get_filenames_from_folder(train_images_dir)
-val_filenames = get_filenames_from_folder(val_images_dir)
+from dataset import RoISegDataset
 
-# 创建自定义数据集类的实例
-train_dataset = CustomDataset(train_images_dir, train_masks_dir, train_signal_dir, train_filenames)
-val_dataset = CustomDataset(val_images_dir, val_masks_dir, val_signal_dir, val_filenames)
-
-# train_dataset = CustomDataset(train_images_dir, train_masks_dir,  train_filenames)
-# val_dataset = CustomDataset(val_images_dir, val_masks_dir,  val_filenames)
-
-
-
+train_dataset = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='train', cls=CLS)
+val_dataset   = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='val',   cls=CLS)
+print(f"Train patches: {len(train_dataset)}  Val patches: {len(val_dataset)}")
 
 train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
-val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
+val_loader   = DataLoader(val_dataset,   batch_size=2, shuffle=False, num_workers=0)
 
 
 
@@ -738,7 +724,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         # # Save the best model
         if dice_score > best_dice:
             best_dice = dice_score
-            checkpoint_dir = f'{path}/fold_{i}/ROI_ckpt'
+            checkpoint_dir = f'{PATCHES_DIR}/fold_{FOLD}/ROI_ckpt'
             os.makedirs(checkpoint_dir, exist_ok=True)
             torch.save(model.state_dict(), f'{checkpoint_dir}/BCSS_effi-Unet_roi_best_dice{best_dice:.4f}_epoch{epoch+1}.pth')
             print(f"Best dice: {best_dice:.4f}")
