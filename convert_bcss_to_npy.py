@@ -34,11 +34,14 @@
 
 import json
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
 from pathlib import Path
 import argparse
 from scipy.ndimage import distance_transform_edt
 from skimage.morphology import skeletonize
+
+# Allow PIL to load truncated/incomplete PNG files
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 # ── BCSS pixel label → ProGIS category ──────────────────────────────────────
@@ -160,12 +163,20 @@ def convert_bcss(images_dir: str, masks_dir: str, output_dir: str,
         filename = f'{stem}.npy'
 
         # Загрузка
-        image   = np.array(Image.open(img_file).convert('RGB'))
+        try:
+            image = np.array(Image.open(img_file).convert('RGB'))
+        except Exception as e:
+            print(f"  ⚠  failed to load image: {img_file.name} ({e}), skipping")
+            continue
         mask_file = masks_dir / img_file.name
         if not mask_file.exists():
             print(f"  ⚠  mask not found: {img_file.name}, skipping")
             continue
-        mc_mask = np.array(Image.open(mask_file))
+        try:
+            mc_mask = np.array(Image.open(mask_file))
+        except Exception as e:
+            print(f"  ⚠  failed to load mask: {mask_file.name} ({e}), skipping")
+            continue
 
         if resize:
             image, mc_mask = resize_to_multiple16(image, mc_mask)
