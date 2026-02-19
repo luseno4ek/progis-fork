@@ -196,6 +196,16 @@ def _get_model_by_name(model_name, classes=1000, pretrained=False, backbone=True
                 pretrained_state_dict['_fc.weight'] = random_state_dict['_fc.weight']
                 pretrained_state_dict['_fc.bias'] = random_state_dict['_fc.bias']
 
+            # Handle stem conv channel mismatch (backbone=False uses 6-channel input)
+            model_stem = model.state_dict()['_conv_stem.weight']
+            pretrained_stem = pretrained_state_dict['_conv_stem.weight']
+            if model_stem.shape != pretrained_stem.shape:
+                new_stem = torch.zeros_like(model_stem)
+                n_ch = pretrained_stem.shape[1]  # 3
+                new_stem[:, :n_ch, :, :] = pretrained_stem  # RGB channels from ImageNet
+                # extra channels (prev_mask, fg_signal, bg_signal) stay zero
+                pretrained_state_dict['_conv_stem.weight'] = new_stem
+
             model.load_state_dict(pretrained_state_dict)
 
     except KeyError as e:

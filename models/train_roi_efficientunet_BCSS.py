@@ -572,15 +572,17 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
 
-    for epoch in range(epochs):
+    epoch_pbar = tqdm(range(epochs), desc="Training", unit="epoch")
+    for epoch in epoch_pbar:
         model.train()
         train_loss = 0.0
         train_dice_score = 0.0
         train_accuracy = 0.0  # 用于累积准确率
         train_true_positive_ratio, train_false_positive_ratio = 0.0 , 0.0
-        
-        
-        for item,(images, masks, aux_inputs) in enumerate(train_loader):
+
+
+        train_batch_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False, unit="batch")
+        for item,(images, masks, aux_inputs) in enumerate(train_batch_pbar):
         # for item,(images, masks) in enumerate(train_loader):
             
             
@@ -620,11 +622,13 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
             outputs = (outputs >= 0.5).int()
             
             train_dice_score += dice_coeff(outputs, masks).item() * images.size(0)
-            
+
             # 计算准确率
             _, batch_accuracy = calculate_binary_segmentation_accuracy(outputs, masks)
             train_accuracy += batch_accuracy * images.size(0)  # 将每个批次的准确率加权累积
-            
+
+            train_batch_pbar.set_postfix(loss=f"{loss.item():.4f}", dice=f"{dice_coeff(outputs, masks).item():.4f}")
+
             # true_positive_ratio_1 = calculate_spp(outputs, masks , suppixels)* images.size(0)
             # train_true_positive_ratio += true_positive_ratio_1 
             
@@ -654,7 +658,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
 
         with torch.no_grad():
             iou_scores = []
-            for images, masks, aux_inputs in val_loader:
+            val_batch_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False, unit="batch")
+            for images, masks, aux_inputs in val_batch_pbar:
             # for images, masks in val_loader:
                 
                 
@@ -686,12 +691,13 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 outputs = (outputs >= 0.5).int()
                 
                 dice_score += dice_coeff(outputs, masks).item() * images.size(0)
-                
+
                 # 计算准确率
                 _, batch_accuracy = calculate_binary_segmentation_accuracy(outputs, masks)
                 val_accuracy += batch_accuracy * images.size(0)  # 将每个批次的准确率加权累积
-                
-                
+
+                val_batch_pbar.set_postfix(loss=f"{loss.item():.4f}", dice=f"{dice_coeff(outputs, masks).item():.4f}")
+
                 # true_positive_ratio_1 = calculate_spp(outputs, masks , suppixels)
                 # val_true_positive_ratio += true_positive_ratio_1 * images.size(0)
                 
@@ -717,7 +723,9 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         
         # val_false_positive_ratio /= len(val_loader.dataset)
 
-        print(f'Epoch {epoch+1}/{epochs}, Train Loss (CombinedLoss): {train_loss:.4f}, Train Dice: {train_dice_score:.4f}, Train Acc: {train_accuracy:.4f}, Val Loss : {val_loss:.4f}, Val Dice: {dice_score:.4f}, Val_Mean IOU: {mean_iou:.4f}, Val_Acc: {val_accuracy:.4f}')
+        epoch_pbar.set_postfix(train_loss=f"{train_loss:.4f}", train_dice=f"{train_dice_score:.4f}",
+                               val_loss=f"{val_loss:.4f}", val_dice=f"{dice_score:.4f}", val_iou=f"{mean_iou:.4f}")
+        print(f'Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f}  Train Dice: {train_dice_score:.4f}  Train Acc: {train_accuracy:.4f} | Val Loss: {val_loss:.4f}  Val Dice: {dice_score:.4f}  Val mIoU: {mean_iou:.4f}  Val Acc: {val_accuracy:.4f}')
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Train_false_positive_ratio:{train_false_positive_ratio:.4f},  Val_true_positive_ratio: {val_true_positive_ratio:.4f}, Val_false_positive_ratio:{val_false_positive_ratio:.4f}')
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Val_true_positive_ratio: {val_true_positive_ratio:.4f}')
         # scheduler.step()
