@@ -395,20 +395,20 @@ def _edt_skeleton_gpu(mask, max_steps=80):
     device = mask.device
 
     # ── 1. Approximate EDT via successive erosion ───────────────────────────
+    # No early exit → zero CPU-GPU syncs inside the loop.
+    # For typical patches the error region radius < max_steps, so all pixels
+    # will have been removed before step max_steps anyway.
     edt = torch.zeros_like(mask)
     current = mask.clone()
-    step = 0
 
     for step in range(1, max_steps + 1):
         next_c = -F.max_pool2d(-current, kernel_size=3, stride=1, padding=1)
         newly_removed = (current > 0) & (next_c == 0)
         edt = edt + newly_removed.float() * step
         current = next_c
-        if current.sum() == 0:
-            break
 
-    # Pixels surviving all steps → assign distance = last step + 1
-    edt = edt + (current > 0).float() * (step + 1)
+    # Pixels surviving all steps → assign distance = max_steps + 1
+    edt = edt + (current > 0).float() * (max_steps + 1)
 
     # ── 2. Random threshold (vectorised across batch) ───────────────────────
     mask_bool = mask > 0
@@ -427,28 +427,22 @@ def _edt_skeleton_gpu(mask, max_steps=80):
 
     core = (edt > thresh) & mask_bool                    # [B, 1, H, W]
 
-    # Fallback: empty core → use max-EDT pixels
-    core_count = core.float().flatten(1).sum(1)
-    need_fallback = (core_count == 0) & (mask.flatten(1).sum(1) > 0)
-    if need_fallback.any():
-        max_edt = (edt * mask).flatten(1).max(1).values.view(B, 1, 1, 1)
-        fallback = ((edt >= max_edt - 1e-6) & mask_bool).float()
-        core_f = core.float()
-        core_f[need_fallback] = fallback[need_fallback]
-        core = core_f.bool()
+    # Fallback: empty core → use max-EDT pixels (torch.where avoids .any() sync)
+    need_fallback = (core.float().flatten(1).sum(1) == 0) & (mask.flatten(1).sum(1) > 0)
+    max_edt = (edt * mask).flatten(1).max(1).values.view(B, 1, 1, 1)
+    fallback_core = (edt >= max_edt - 1e-6) & mask_bool
+    core = torch.where(need_fallback.view(B, 1, 1, 1), fallback_core, core)
 
     # ── 3. Ridge = local maxima of EDT within core (skeleton) ───────────────
     core_edt  = edt * core.float()
     local_max = F.max_pool2d(core_edt, kernel_size=3, stride=1, padding=1)
     ridge = (core_edt >= local_max - 1e-6) & core
 
-    # Fallback: empty ridge → use core directly
-    ridge_f = ridge.float()
-    empty_ridge = (ridge_f.flatten(1).sum(1) == 0) & (core.float().flatten(1).sum(1) > 0)
-    if empty_ridge.any():
-        ridge_f[empty_ridge] = core.float()[empty_ridge]
+    # Fallback: empty ridge → use core (torch.where avoids .any() sync)
+    empty_ridge = (ridge.float().flatten(1).sum(1) == 0) & (core.float().flatten(1).sum(1) > 0)
+    ridge = torch.where(empty_ridge.view(B, 1, 1, 1), core, ridge)
 
-    return ridge_f
+    return ridge.float()
 
 
 def processMasks_gpu(pred_mask_all, GT_mask_all, max_edt_steps=80):
@@ -719,7 +713,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
                 pred_mask_1 = model(input)
 
-            signal = processMasks(pred_mask_1.float(), masks)
+            signal = processMasks_gpu(pred_mask_1.float(), masks)
             union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
 
             with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
@@ -796,7 +790,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                     # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
                     pred_mask_1 = model(input)
 
-                signal = processMasks(pred_mask_1.float(), masks)
+                signal = processMasks_gpu(pred_mask_1.float(), masks)
                 union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
 
                 with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
