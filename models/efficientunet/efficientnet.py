@@ -188,8 +188,8 @@ def _get_model_by_name(model_name, classes=1000, pretrained=False, backbone=True
     try:
         if pretrained:
             
-            pretrained_state_dict = torch.load('/home/gjs/ISF_nuclick/checkpoints/Efficientnet/efficientnet-b0-355c32eb.pth')
-            # pretrained_state_dict = load_state_dict_from_url(IMAGENET_WEIGHTS[model_name])
+            # pretrained_state_dict = torch.load('/home/gjs/ISF_nuclick/checkpoints/Efficientnet/efficientnet-b0-355c32eb.pth')
+            pretrained_state_dict = load_state_dict_from_url(IMAGENET_WEIGHTS[model_name])
 
             if classes != 1000:
                 random_state_dict = model.state_dict()
