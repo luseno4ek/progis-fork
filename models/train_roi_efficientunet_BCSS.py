@@ -16,6 +16,7 @@ from torchvision import models
 
 import torch.optim as optim
 from concurrent.futures import ThreadPoolExecutor
+from torch.utils.tensorboard import SummaryWriter
 
 from scipy.ndimage import distance_transform_edt
 import scipy.ndimage as ndi
@@ -682,6 +683,9 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
     best_dice = 0.0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
+    tb_dir = f'{PATCHES_DIR}/fold_{FOLD}/runs/fold{FOLD}_{CLS}'
+    writer = SummaryWriter(log_dir=tb_dir)
+    print(f"TensorBoard logs: {tb_dir}")
     scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
     epoch_pbar = tqdm(range(epochs), desc="Training", unit="epoch")
@@ -799,9 +803,10 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                     input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
                     pred_mask_2 = model(input)
 
-                    loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
-                # loss = calc_dc_loss_sp(masks, all_pixel_features, superpixels , fg_proto_features)
-                val_loss += loss.item() * images.size(0)
+                # compute loss in float32 to avoid fp16 overflow → nan
+                loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
+                if not torch.isnan(loss):
+                    val_loss += loss.item() * images.size(0)
                 
                 outputs = pred_mask_2
                 outputs = (outputs >= 0.5).int()
@@ -842,6 +847,11 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         epoch_pbar.set_postfix(train_loss=f"{train_loss:.4f}", train_dice=f"{train_dice_score:.4f}",
                                val_loss=f"{val_loss:.4f}", val_dice=f"{dice_score:.4f}", val_iou=f"{mean_iou:.4f}")
         print(f'Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f}  Train Dice: {train_dice_score:.4f}  Train Acc: {train_accuracy:.4f} | Val Loss: {val_loss:.4f}  Val Dice: {dice_score:.4f}  Val mIoU: {mean_iou:.4f}  Val Acc: {val_accuracy:.4f}')
+
+        writer.add_scalars('Loss',     {'train': train_loss, 'val': val_loss},           epoch + 1)
+        writer.add_scalars('Dice',     {'train': train_dice_score, 'val': dice_score},   epoch + 1)
+        writer.add_scalars('Accuracy', {'train': train_accuracy, 'val': val_accuracy},   epoch + 1)
+        writer.add_scalar ('Val/mIoU', mean_iou, epoch + 1)
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Train_false_positive_ratio:{train_false_positive_ratio:.4f},  Val_true_positive_ratio: {val_true_positive_ratio:.4f}, Val_false_positive_ratio:{val_false_positive_ratio:.4f}')
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Val_true_positive_ratio: {val_true_positive_ratio:.4f}')
         # scheduler.step()
@@ -853,6 +863,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
             os.makedirs(checkpoint_dir, exist_ok=True)
             torch.save(model.state_dict(), f'{checkpoint_dir}/BCSS_effi-Unet_roi_best_dice{best_dice:.4f}_epoch{epoch+1}.pth')
             print(f"Best dice: {best_dice:.4f}")
+    writer.close()
 
 
 
