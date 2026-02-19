@@ -15,6 +15,7 @@ from tqdm import tqdm
 from torchvision import models
 
 import torch.optim as optim
+from concurrent.futures import ThreadPoolExecutor
 
 from scipy.ndimage import distance_transform_edt
 import scipy.ndimage as ndi
@@ -370,7 +371,58 @@ def processMasks(pred_mask_all, GT_mask_all):
 
 ##########################################################################################################
 
+# ── GPU version of processMasks ──────────────────────────────────────────────
 
+def _erode_gpu(mask, n_iters):
+    """
+    Morphological erosion via min-pooling (fully on GPU, no CPU transfer).
+    mask: [B, 1, H, W] float32 binary tensor.
+    """
+    x = mask
+    for _ in range(n_iters):
+        x = -F.max_pool2d(-x, kernel_size=3, stride=1, padding=1)
+    return x
+
+
+def processMasks_gpu(pred_mask_all, GT_mask_all, n_erode=6):
+    """
+    GPU-only drop-in replacement for processMasks.
+
+    Approximates the CPU pipeline (largest-CC → distance_transform_edt → skeletonize)
+    with repeated morphological erosion on GPU:
+      - n_erode iterations of 3×3 min-pooling thin the error region from the boundary,
+        leaving a 'core' similar to the skeleton of the inner part.
+      - Fallback: if erosion empties a region, the full error mask is used instead.
+
+    Outputs both fg and bg channels (unlike the CPU version which only fills one),
+    which gives slightly more guidance signal but is otherwise equivalent.
+
+    Args:
+        pred_mask_all: [B, 1, H, W]  model prediction (raw logits or probabilities)
+        GT_mask_all:   [B, 1, H, W]  ground truth binary mask
+        n_erode:       number of erosion steps (default 6 ≈ removes 6-px boundary ring)
+    Returns:
+        [B, 2, H, W]  float32,  ch0 = fg guidance,  ch1 = bg guidance
+    """
+    pred_bin = (pred_mask_all > 0.5).float()
+
+    fg = ((GT_mask_all == 1) & (pred_bin == 0)).float()   # missed fg
+    bg = ((GT_mask_all == 0) & (pred_bin == 1)).float()   # false positive bg
+
+    fg_signal = _erode_gpu(fg, n_erode)
+    bg_signal = _erode_gpu(bg, n_erode)
+
+    # If erosion wiped a non-empty region, fall back to the full error mask
+    fg_empty = (fg_signal.flatten(1).sum(1) == 0) & (fg.flatten(1).sum(1) > 0)
+    bg_empty = (bg_signal.flatten(1).sum(1) == 0) & (bg.flatten(1).sum(1) > 0)
+    if fg_empty.any():
+        fg_signal[fg_empty] = fg[fg_empty]
+    if bg_empty.any():
+        bg_signal[bg_empty] = bg[bg_empty]
+
+    return torch.cat([fg_signal, bg_signal], dim=1)   # [B, 2, H, W]
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 
