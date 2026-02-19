@@ -672,7 +672,7 @@ model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=True,
 
   
 
-optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=4e-4)
+optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
 
 
 
@@ -687,6 +687,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
     writer = SummaryWriter(log_dir=tb_dir)
     print(f"TensorBoard logs: {tb_dir}")
     scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     epoch_pbar = tqdm(range(epochs), desc="Training", unit="epoch")
     for epoch in epoch_pbar:
@@ -728,18 +729,21 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
 
                 loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
 
-            # loss = calc_dc_loss_sp(masks, all_pixel_features, superpixels , fg_proto_features)
-            # loss = dice_loss(first_seg, masks)
+            if torch.isnan(loss) or torch.isinf(loss):
+                train_batch_pbar.set_postfix(loss="NaN/Inf — skipped")
+                optimizer.zero_grad()
+                continue
+
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
-            
+
             train_loss += loss.item() * images.size(0)
-            
-            outputs = pred_mask_2
-            
-            outputs = (outputs >= 0.5).int()
-            
+
+            outputs = (pred_mask_2 >= 0.5).int()
+
             train_dice_score += dice_coeff(outputs, masks).item() * images.size(0)
 
             # 计算准确率
@@ -852,10 +856,12 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         writer.add_scalars('Dice',     {'train': train_dice_score, 'val': dice_score},   epoch + 1)
         writer.add_scalars('Accuracy', {'train': train_accuracy, 'val': val_accuracy},   epoch + 1)
         writer.add_scalar ('Val/mIoU', mean_iou, epoch + 1)
+        writer.add_scalar ('AMP/scaler_scale', scaler.get_scale(), epoch + 1)
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Train_false_positive_ratio:{train_false_positive_ratio:.4f},  Val_true_positive_ratio: {val_true_positive_ratio:.4f}, Val_false_positive_ratio:{val_false_positive_ratio:.4f}')
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Val_true_positive_ratio: {val_true_positive_ratio:.4f}')
-        # scheduler.step()
-        
+        scheduler.step()
+        writer.add_scalar('LR', scheduler.get_last_lr()[0], epoch + 1)
+
         # # Save the best model
         if dice_score > best_dice:
             best_dice = dice_score
