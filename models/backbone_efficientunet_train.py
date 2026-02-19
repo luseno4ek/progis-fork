@@ -406,7 +406,7 @@ print(f"Train patches: {len(train_dataset)}  Val patches: {len(val_dataset)}")
 
 # 创建模型实例
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False).to(device)
+model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=True).to(device)
 
 try:
     from torchinfo import summary

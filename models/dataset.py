@@ -47,6 +47,9 @@ def get_wsi_stem(patch_filename: str) -> str:
 # Input: image [H,W,3] + mask [H,W] + signal [2,H,W]
 # ─────────────────────────────────────────────────────────────────────────────
 
+ALL_CLASSES = ['tumor', 'stroma', 'inflammatory_infiltration', 'necrosis', 'others']
+
+
 class RoISegDataset(Dataset):
     """
     Dataset for P-RoISeg training (Stage 2).
@@ -56,39 +59,40 @@ class RoISegDataset(Dataset):
         splits_path:  path to fold_splits.json
         fold:         int, 1-5
         split:        'train' or 'val'
-        cls:          class name, e.g. 'tumor'
+        cls:          class name, e.g. 'tumor', or 'all' to use all classes
     """
 
     def __init__(self, patches_dir: str, splits_path: str,
                  fold: int, split: str, cls: str):
         self.patches_dir = Path(patches_dir)
-        self.cls         = cls
-        self.split       = split
 
-        # Загружаем допустимые WSI-стемы для этого фолда
-        fold_splits  = load_fold_splits(splits_path)
-        valid_stems  = set(fold_splits[f'fold_{fold}'][split])
+        fold_splits = load_fold_splits(splits_path)
+        valid_stems = set(fold_splits[f'fold_{fold}'][split])
 
-        # Список файлов: только те, чей WSI-стем в нужном фолде
-        mask_dir = self.patches_dir / cls / 'mask_npy'
-        all_files = sorted(mask_dir.glob('*.npy'))
-        self.filenames = [
-            f.name for f in all_files
-            if get_wsi_stem(f.name) in valid_stems
-        ]
+        classes = ALL_CLASSES if cls == 'all' else [cls]
+
+        # Each item: (filename, class_name)
+        self.items: list[tuple[str, str]] = []
+        for c in classes:
+            mask_dir = self.patches_dir / c / 'mask_npy'
+            if not mask_dir.exists():
+                continue
+            for f in sorted(mask_dir.glob('*.npy')):
+                if get_wsi_stem(f.name) in valid_stems:
+                    self.items.append((f.name, c))
 
         print(f"RoISegDataset | fold={fold} {split} | cls={cls} | "
-              f"{len(self.filenames)} patches")
+              f"{len(self.items)} patches")
 
     def __len__(self):
-        return len(self.filenames)
+        return len(self.items)
 
     def __getitem__(self, idx):
-        fname = self.filenames[idx]
+        fname, cls = self.items[idx]
 
         image  = np.load(self.patches_dir / 'all' / 'image_npy' / fname)  # [H,W,3]
-        mask   = np.load(self.patches_dir / self.cls / 'mask_npy' / fname) # [H,W]
-        signal = np.load(self.patches_dir / self.cls / 'signal_all_line_npy' / fname)  # [2,H,W]
+        mask   = np.load(self.patches_dir / cls / 'mask_npy' / fname)      # [H,W]
+        signal = np.load(self.patches_dir / cls / 'signal_all_line_npy' / fname)  # [2,H,W]
 
         image  = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32)
         mask   = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)

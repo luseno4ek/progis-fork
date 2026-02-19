@@ -16,9 +16,9 @@ from torchvision import models
 
 import torch.optim as optim
 
-from scipy.ndimage.morphology import distance_transform_edt
+from scipy.ndimage import distance_transform_edt
 import scipy.ndimage as ndi
-from skimage.morphology import skeletonize_3d
+from skimage.morphology import skeletonize
 
 
 import numpy as np
@@ -219,7 +219,7 @@ def generateGuidingSignal(binaryMask):
             newMask = binaryMask
 
         # Skeletonize (use skimage and convert back to tensor)
-        skel = skeletonize_3d(newMask.cpu().numpy())
+        skel = skeletonize(newMask.cpu().numpy())
         skel = torch.tensor(skel, dtype=torch.float32, device=binaryMask.device)
     else:
         skel = torch.zeros_like(binaryMask, dtype=torch.float32, device=binaryMask.device)
@@ -522,7 +522,8 @@ def get_filenames_from_folder(folder_path):
 FOLD        = 1
 PATCHES_DIR = "../data/patches"
 SPLITS_JSON = "../data/patches/fold_splits.json"
-CLS         = 'tumor'       # class to train on
+CLS         = 'all'         # 'all' = все классы (как в статье), или 'tumor', 'stroma', etc.
+GPU_ID      = 1             # CUDA device index (0, 1, 2, ...)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # train_images_dir = "/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/ROI_data/all_class/image_npy"
@@ -540,14 +541,14 @@ train_dataset = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='train'
 val_dataset   = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='val',   cls=CLS)
 print(f"Train patches: {len(train_dataset)}  Val patches: {len(val_dataset)}")
 
-train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
-val_loader   = DataLoader(val_dataset,   batch_size=2, shuffle=False, num_workers=0)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
+val_loader   = DataLoader(val_dataset,   batch_size=16, shuffle=False, num_workers=4)
 
 
 
 # 创建模型实例 - P-RoISeg uses backbone=False for 6-channel input (RGB+prev_mask+fg_signal+bg_signal)
-device = 'cpu'  # use CPU on macOS without GPU
-model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False, backbone=False).to(device)
+device = f'cuda:{GPU_ID}' if torch.cuda.is_available() else 'cpu'
+model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=True, backbone=False).to(device)
 
 # model = MultiScaleResUnet(in_channels=5, num_classes=1)
 
@@ -731,11 +732,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
 
 
 
-# print("模型：", model.__class__.__name__)
-print(train_images_dir)
-print("fold:",i)
-
-train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=2)
+print(f"FOLD={FOLD}  CLS={CLS}  device={device}")
+train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs=50)
 
 
 
