@@ -653,8 +653,8 @@ train_dataset = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='train'
 val_dataset   = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='val',   cls=CLS)
 print(f"Train patches: {len(train_dataset)}  Val patches: {len(val_dataset)}")
 
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
-val_loader   = DataLoader(val_dataset,   batch_size=32, shuffle=False, num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
+val_loader   = DataLoader(val_dataset,   batch_size=16, shuffle=False, num_workers=4)
 
 
 
@@ -672,7 +672,7 @@ model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=True,
 
   
 
-optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
+optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=4e-4)
 
 
 
@@ -686,8 +686,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
     tb_dir = f'{PATCHES_DIR}/fold_{FOLD}/runs/fold{FOLD}_{CLS}'
     writer = SummaryWriter(log_dir=tb_dir)
     print(f"TensorBoard logs: {tb_dir}")
-    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     epoch_pbar = tqdm(range(epochs), desc="Training", unit="epoch")
     for epoch in epoch_pbar:
@@ -713,32 +712,20 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
 
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                input = torch.cat((images, pred_mask, aux_inputs), dim=1)
-                # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
-                pred_mask_1 = model(input)
+            input = torch.cat((images, pred_mask, aux_inputs), dim=1)
+            pred_mask_1 = model(input)
 
             signal = processMasks_gpu(pred_mask_1.float(), masks)
-            union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
+            union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8)).float()
 
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                pre_mask_1_threod = (pred_mask_1 >= 0.5).int()
-                # # dist_map = get_dist_maps_batch(union_signal)
-                input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
-                pred_mask_2 = model(input)
+            pre_mask_1_threod = (pred_mask_1 >= 0.5).float()
+            input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
+            pred_mask_2 = model(input)
 
-                loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
+            loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
 
-            if torch.isnan(loss) or torch.isinf(loss):
-                train_batch_pbar.set_postfix(loss="NaN/Inf — skipped")
-                optimizer.zero_grad()
-                continue
-
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            loss.backward()
+            optimizer.step()
 
             train_loss += loss.item() * images.size(0)
 
@@ -793,24 +780,18 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 pred_mask = torch.zeros_like(masks)
                 # aux_inputs = processMasks(pred_mask, masks)
 
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                    input = torch.cat((images, pred_mask, aux_inputs), dim=1)
-                    # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
-                    pred_mask_1 = model(input)
+                input = torch.cat((images, pred_mask, aux_inputs), dim=1)
+                pred_mask_1 = model(input)
 
                 signal = processMasks_gpu(pred_mask_1.float(), masks)
-                union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
+                union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8)).float()
 
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                    pre_mask_1_threod = (pred_mask_1 >= 0.5).int()
-                    # # dist_map = get_dist_maps_batch(union_signal)
-                    input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
-                    pred_mask_2 = model(input)
+                pre_mask_1_threod = (pred_mask_1 >= 0.5).float()
+                input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
+                pred_mask_2 = model(input)
 
-                # compute loss in float32 to avoid fp16 overflow → nan
                 loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
-                if not torch.isnan(loss):
-                    val_loss += loss.item() * images.size(0)
+                val_loss += loss.item() * images.size(0)
                 
                 outputs = pred_mask_2
                 outputs = (outputs >= 0.5).int()
@@ -856,11 +837,10 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         writer.add_scalars('Dice',     {'train': train_dice_score, 'val': dice_score},   epoch + 1)
         writer.add_scalars('Accuracy', {'train': train_accuracy, 'val': val_accuracy},   epoch + 1)
         writer.add_scalar ('Val/mIoU', mean_iou, epoch + 1)
-        writer.add_scalar ('AMP/scaler_scale', scaler.get_scale(), epoch + 1)
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Train_false_positive_ratio:{train_false_positive_ratio:.4f},  Val_true_positive_ratio: {val_true_positive_ratio:.4f}, Val_false_positive_ratio:{val_false_positive_ratio:.4f}')
         # print(f'Epoch {epoch+1}/{epochs}, Train_true_positive_ratio: {train_true_positive_ratio:.4f}, Val_true_positive_ratio: {val_true_positive_ratio:.4f}')
-        scheduler.step()
-        writer.add_scalar('LR', scheduler.get_last_lr()[0], epoch + 1)
+        # scheduler.step()
+        # writer.add_scalar('LR', scheduler.get_last_lr()[0], epoch + 1)
 
         # # Save the best model
         if dice_score > best_dice:
