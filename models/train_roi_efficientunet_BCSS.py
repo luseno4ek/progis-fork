@@ -521,7 +521,7 @@ def get_filenames_from_folder(folder_path):
 # ── Configuration ────────────────────────────────────────────────────────────
 FOLD        = 1
 PATCHES_DIR = "../data/patches"
-SPLITS_JSON = "../data/processed/fold_splits.json"
+SPLITS_JSON = "../data/patches/fold_splits.json"
 CLS         = 'tumor'       # class to train on
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -25,6 +25,7 @@
       --classes tumor stroma   # только нужные классы
 """
 
+import shutil
 import numpy as np
 from pathlib import Path
 import argparse
@@ -165,6 +166,13 @@ def create_patches(input_dir: str, output_dir: str,
         n = len(list((output_dir / cls / 'mask_npy').glob('*.npy')))
         print(f"  {cls:30s}: {n} foreground patches")
     print(f"{'='*60}")
+    # Копируем fold_splits.json в папку патчей — processed/ можно удалить после этого
+    src_splits = input_dir / 'fold_splits.json'
+    dst_splits = output_dir / 'fold_splits.json'
+    if src_splits.exists():
+        shutil.copy2(src_splits, dst_splits)
+        print(f"  fold_splits.json → {dst_splits}")
+
     print(f"\nNext step:")
     print(f"  python generate_superpixels.py --input_dir {output_dir} --output_dir {output_dir}")
 

@@ -386,7 +386,7 @@ def get_fg_filenames(images_dir, masks_dir):
 # ── Configuration ────────────────────────────────────────────────────────────
 FOLD        = 1
 PATCHES_DIR = "../data/patches"
-SPLITS_JSON = "../data/processed/fold_splits.json"
+SPLITS_JSON = "../data/patches/fold_splits.json"
 CLS         = 'tumor'       # class used for contrastive learning
 N_SEGMENTS  = 500
 # ─────────────────────────────────────────────────────────────────────────────
@@ -405,8 +405,17 @@ print(f"Train patches: {len(train_dataset)}  Val patches: {len(val_dataset)}")
 
 
 # 创建模型实例
-device = 'cpu'  # use CPU on macOS without GPU
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False).to(device)
+
+try:
+    from torchinfo import summary
+    summary(model, input_size=(1, 3, 512, 512), device=device,
+            col_names=["input_size", "output_size", "num_params", "trainable"])
+except ImportError:
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model params: total={total:,}  trainable={trainable:,}")
 
 
 if multiGPU :
@@ -435,8 +444,8 @@ if multiGPU :
     # map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
     # model.load_state_dict(torch.load('/home/gjs/ISF_nuclick/checkpoints_new/contrast_learing/resnet18TCGABR-Rdnct3_spp_ss_dc_ALL.pth' , map_location=map_location), strict=False)
 else:
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
     
 
 
@@ -446,12 +455,12 @@ loss_fn = 1
 
 
 # Training function
-# Training function
 def train_model(model, train_loader, val_loader, optimizer, epochs=50):
-    
+
     best_val_loss = 10.0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
+    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
     epoch_pbar = tqdm(range(epochs), desc="Overall Training Progress", unit="epoch")
 
     for epoch in epoch_pbar:
@@ -459,19 +468,20 @@ def train_model(model, train_loader, val_loader, optimizer, epochs=50):
         train_loss = 0.0
 
         train_batch_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Training]", leave=False, unit="batch")
-        
+
         for images, masks, superpixels in train_batch_pbar:
-            
-            
-            images,  masks, superpixels = images.to(device), masks.to(device), superpixels.to(device)
+            images, masks, superpixels = images.to(device), masks.to(device), superpixels.to(device)
             optimizer.zero_grad()
 
-            all_pixel_features = model(images)
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                all_pixel_features = model(images)
 
-            loss = calc_dc_loss_sp(masks, all_pixel_features, superpixels)
+            # loss computed in fp32 (contrastive loss has exp/log — needs fp32 precision)
+            loss = calc_dc_loss_sp(masks, all_pixel_features.float(), superpixels)
 
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             train_loss += loss.item() * images.size(0)
             train_batch_pbar.set_postfix(batch_loss=f"{loss.item():.4f}")
@@ -488,12 +498,12 @@ def train_model(model, train_loader, val_loader, optimizer, epochs=50):
         with torch.no_grad():
             iou_scores = []
             val_batch_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Validation]", leave=False, unit="batch")
-            
-            for images, masks, superpixels in val_batch_pbar:
-                images, masks, superpixels= images.to(device),  masks.to(device), superpixels.to(device)
-                all_pixel_features = model(images)
 
-                loss = calc_dc_loss_sp(masks, all_pixel_features, superpixels)
+            for images, masks, superpixels in val_batch_pbar:
+                images, masks, superpixels = images.to(device), masks.to(device), superpixels.to(device)
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    all_pixel_features = model(images)
+                loss = calc_dc_loss_sp(masks, all_pixel_features.float(), superpixels)
                 val_loss += loss.item() * images.size(0)
                 
                 val_batch_pbar.set_postfix(batch_loss=f"{loss.item():.4f}")
