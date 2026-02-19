@@ -541,8 +541,8 @@ train_dataset = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='train'
 val_dataset   = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='val',   cls=CLS)
 print(f"Train patches: {len(train_dataset)}  Val patches: {len(val_dataset)}")
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
-val_loader   = DataLoader(val_dataset,   batch_size=16, shuffle=False, num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+val_loader   = DataLoader(val_dataset,   batch_size=32, shuffle=False, num_workers=4)
 
 
 
@@ -571,6 +571,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
     best_dice = 0.0
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
+    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
     epoch_pbar = tqdm(range(epochs), desc="Training", unit="epoch")
     for epoch in epoch_pbar:
@@ -584,36 +585,39 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         train_batch_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False, unit="batch")
         for item,(images, masks, aux_inputs) in enumerate(train_batch_pbar):
         # for item,(images, masks) in enumerate(train_loader):
-            
-            
+
+
             images, aux_inputs, masks= images.to(device), aux_inputs.to(device), masks.to(device)
             # images,  masks= images.to(device), masks.to(device)
-            
+
             # dist_map = get_dist_maps_batch(aux_inputs)
             # 生成与 masks 形状相同的全零张量
             pred_mask = torch.zeros_like(masks)
             # aux_inputs = processMasks(pred_mask, masks)
-            
-            input = torch.cat((images, pred_mask, aux_inputs), dim=1)
-            
+
             optimizer.zero_grad()
-            # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
-            pred_mask_1 = model(input)
-            
-            signal = processMasks(pred_mask_1, masks)
+
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                input = torch.cat((images, pred_mask, aux_inputs), dim=1)
+                # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
+                pred_mask_1 = model(input)
+
+            signal = processMasks(pred_mask_1.float(), masks)
             union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
-            
-            pre_mask_1_threod = (pred_mask_1 >= 0.5).int()
-            # # dist_map = get_dist_maps_batch(union_signal)
-            input = torch.cat((images, pre_mask_1_threod, union_signal ), dim=1)
-            pred_mask_2 = model(input)
- 
-            loss = dice_loss(pred_mask_1, masks) + dice_loss(pred_mask_2, masks)
+
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                pre_mask_1_threod = (pred_mask_1 >= 0.5).int()
+                # # dist_map = get_dist_maps_batch(union_signal)
+                input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
+                pred_mask_2 = model(input)
+
+                loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
+
             # loss = calc_dc_loss_sp(masks, all_pixel_features, superpixels , fg_proto_features)
-            
             # loss = dice_loss(first_seg, masks)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             train_loss += loss.item() * images.size(0)
             
@@ -664,26 +668,27 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 
                 
                 images, aux_inputs, masks = images.to(device), aux_inputs.to(device), masks.to(device)
-                images, masks = images.to(device),  masks.to(device)
-                
+
                 # dist_map = get_dist_maps_batch(aux_inputs)
                 # 生成与 masks 形状相同的全零张量
                 pred_mask = torch.zeros_like(masks)
                 # aux_inputs = processMasks(pred_mask, masks)
-                input = torch.cat((images, pred_mask, aux_inputs), dim=1)
-                
-                # optimizer.zero_grad()
-                # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
-                pred_mask_1 = model(input)
-                
-                signal = processMasks(pred_mask_1, masks)
+
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    input = torch.cat((images, pred_mask, aux_inputs), dim=1)
+                    # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
+                    pred_mask_1 = model(input)
+
+                signal = processMasks(pred_mask_1.float(), masks)
                 union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
-                pre_mask_1_threod = (pred_mask_1 >= 0.5).int()
-                # # dist_map = get_dist_maps_batch(union_signal)
-                input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
-                pred_mask_2 = model(input)
-    
-                loss = dice_loss(pred_mask_1, masks) + dice_loss(pred_mask_2, masks)
+
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    pre_mask_1_threod = (pred_mask_1 >= 0.5).int()
+                    # # dist_map = get_dist_maps_batch(union_signal)
+                    input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
+                    pred_mask_2 = model(input)
+
+                    loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
                 # loss = calc_dc_loss_sp(masks, all_pixel_features, superpixels , fg_proto_features)
                 val_loss += loss.item() * images.size(0)
                 
