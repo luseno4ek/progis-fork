@@ -203,7 +203,7 @@ class EfficientUNet_proto(nn.Module):
     def __init__(self, freeze=False, pretrained=True):
         super().__init__()
         self.freeze = freeze
-        self.EfficientUNet_backbone = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False, backbone=True)
+        self.EfficientUNet_backbone = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=True, backbone=True)
         self.segment_part = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False, backbone=False)
         
 
@@ -1200,110 +1200,61 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
 # cls = '6'
 # choices=['tumor', 'stroma', 'inflammatory_infiltration','necrosis', 'others']
 
-choices=['1', '2', '3', '4', '5']
+# ── Config ────────────────────────────────────────────────────────────────────
+FOLD        = 1
+CLS         = 'all'
+PATCHES_DIR = '../data/patches'
+SPLITS_JSON = '../data/processed/fold_splits.json'
+# Checkpoint: trained ROI-Seg model — update path to your best checkpoint
+# e.g. ../data/patches/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.XXXX_epochN.pth
+ROI_CKPT    = '../data/patches/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.4354_epoch1.pth'
+# ─────────────────────────────────────────────────────────────────────────────
 
-fold_list = [5]
+from dataset import RoISegDataset
 
-for fold_num in fold_list:
-    
+class InferenceDataset(torch.utils.data.Dataset):
+    """Wraps RoISegDataset to match inference loader format:
+       (image, aux_input, mask, suppixel_dummy, filename)
+       suppixel is zeros — used only as shape reference inside model.forward.
+    """
+    def __init__(self, base_dataset):
+        self.base = base_dataset
 
-    # threod_sim = 0.4
+    def __len__(self):
+        return len(self.base)
 
-    device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
-    ########################################################################### 创建模型实例 ####################################################################################
-    model = EfficientUNet_proto()
-
-    ckpt = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI/fold_{fold_num}/efficientUnet/efficientUnet_best.pth'
-    # ckpt = '/home/gjs/ISF_nuclick/TransUNet/Pretrained_path/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz'
-    # # 去除 'module.' 前缀
-    
-    # # ResNetUNet_state_dict = torch.load('/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/z_checkpoint_125WSI/nochange_resunet_19_loss6.479592312587781.pth', map_location='cpu')
-    # from collections import OrderedDict
-    # new_state_dict = OrderedDict()
-    # for k, v in ResNetUNet_state_dict.items():
-    #     # 去掉 `module.` 前缀
-    #     if k.startswith('module.'):
-    #         k = k[7:]
-    #     new_state_dict[k] = v
-    # # 加载修改后的权重到模型
-    
-    ResNetUNet_state_dict = torch.load(ckpt, map_location='cpu')
-    model.EfficientUNet_backbone.load_state_dict(ResNetUNet_state_dict, strict=True)
-    # model.TransUNet.load_from(weights=np.load(ckpt))
-
-    # model.segment_part.load_state_dict(torch.load(f'/home/gjs/ISF_nuclick/check_points_BCSS/ROI_ckpt/efficient_Unet_roi_best_1+1_noorignal_1therod.pth', map_location='cpu'))
-    model.segment_part.load_state_dict(torch.load(f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI/fold_{fold_num}/ROI_ckpt/BCSS_effi-Unet_roi_best_1+1_threod_allmask.pth', map_location='cpu'))
-
-    # 冻结第一个模型部分的参数
-    for param in model.segment_part.parameters():
-        param.requires_grad = False 
-    for param in model.EfficientUNet_backbone.parameters():
-        param.requires_grad = False 
-    if multiGPU:
-        model = nn.DataParallel(model, device_ids=[0, 1])
-    ##############################################################################################################################################################
-    threod_sim_list = [0.1,0.15,0.2,0.25,0.3,0.4,0.5,0.6,0.7,0.8,0.85]
-    
+    def __getitem__(self, idx):
+        image, mask, signal = self.base[idx]
+        fname, _ = self.base.items[idx]
+        suppixel = torch.zeros(1, image.shape[1], image.shape[2], dtype=torch.float32)
+        return image, signal, mask, suppixel, fname
 
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    for a in range(len(threod_sim_list)):
-        threod_sim = threod_sim_list[a]
-        
-        dice_list = []
-        iou_list = []
-        acc_list = [] 
-        for i in range(5):
-            
-            cls = choices[i]
-            # train_images_dir = f"/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/train/{cls}/image_npy"
-            # train_masks_dir = f"/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/train/{cls}/mask_npy"
-            # train_signal_dir = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/train/{cls}/signal_max_point_npy'
-            # train_superpixel_dir = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/train/{cls}/image_SLIC_600'
+# Model: ImageNet pretrained backbone (pretrained=True set in __init__)
+#        + our trained ROI-Seg (segment_part)
+model = EfficientUNet_proto()
+model.segment_part.load_state_dict(torch.load(ROI_CKPT, map_location='cpu'))
+print(f"Loaded ROI-Seg checkpoint: {ROI_CKPT}")
 
-            # val_images_dir = f"/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/{cls}/image_npy"
-            # val_masks_dir = f"/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/{cls}/mask_npy"
-            # val_signal_dir = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/{cls}/signal_max_point_npy'
-            # val_superpixel_dir = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/150/val/{cls}/image_SLIC_600'
+for param in model.parameters():
+    param.requires_grad = False
 
-            # train_images_dir = f"/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/filling/{cls}/image_npy"
-            # train_masks_dir = f"/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/filling/{cls}/mask_npy"
-            # train_signal_dir = f'/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/filling/{cls}/signal_max_point_npy'
-            # train_superpixel_dir = f'/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/filling/{cls}/image_SLIC_600'
+if multiGPU:
+    model = nn.DataParallel(model, device_ids=[0, 1])
 
-            val_images_dir = f"/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI/fold_{fold_num}/val/{cls}/image_npy"
-            val_masks_dir = f"/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI/fold_{fold_num}/val/{cls}/mask_npy"
-            val_signal_dir = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI/fold_{fold_num}/val/{cls}/signal_max_point_npy'
-            val_superpixel_dir = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI/fold_{fold_num}/val/{cls}/image_SLIC_500'
+# Cosine-similarity threshold for backbone prototype matching
+# Test several values — optimal depends on ImageNet feature quality
+threod_sim_list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85]
 
+val_base    = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='val', cls=CLS)
+val_dataset = InferenceDataset(val_base)
+val_loader  = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
 
-            # 获取训练集和验证集的文件名
-            # train_filenames = get_filenames_from_folder(train_images_dir)
-            val_filenames = get_filenames_from_folder(val_images_dir)
+for threod_sim in threod_sim_list:
+    dice, iou, acc = train_model(model, val_loader, epochs=1, threod=threod_sim,
+                                 fold=FOLD, cls_num=CLS)
+    print(f"threod={threod_sim:.2f} | Dice@20={dice:.4f}  mIoU@20={iou:.4f}  Acc={acc:.4f}")
 
-            # 创建自定义数据集类的实例
-            # train_dataset = CustomDataset(train_images_dir, train_signal_dir, train_masks_dir, train_superpixel_dir, train_filenames)
-            val_dataset = CustomDataset(val_images_dir, val_signal_dir, val_masks_dir, val_superpixel_dir, val_filenames)
-            #####################################################
-
-            # train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
-            val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
-
-            dice, iou, acc = train_model(model, val_loader, epochs=1, threod=threod_sim, fold=fold_num , cls_num =cls)
-            dice_list.append(dice)
-            iou_list.append(iou)
-            acc_list.append(acc)
-
-            print(f"{cls}_batch_size = 32,  test")
-
-
-        mdice = np.mean(dice_list)
-        mAcc = np.mean(acc_list)
-        miou = np.mean(iou_list)
-
-        print(f"threod_sim:{threod_sim:.4f},mdice:{mdice:.4f}, mAcc:{mAcc:.4f}, miou:{miou:.4f}")
-        print(ckpt)
-        print("fold",fold_num)
-    
-    # 清空显存
-    torch.cuda.empty_cache()
+torch.cuda.empty_cache()
