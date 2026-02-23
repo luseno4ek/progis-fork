@@ -22,6 +22,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import binary_dilation
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.animation import FuncAnimation, PillowWriter
@@ -232,10 +233,18 @@ def combined_overlay(img: np.ndarray, masks_per_class: dict,
     return out
 
 
-def scribble_overlay(img: np.ndarray, signals_per_class: dict) -> np.ndarray:
+def _dilate(mask: np.ndarray, radius: int = 3) -> np.ndarray:
+    """Thicken a binary mask with a disk-shaped structuring element."""
+    struct = np.ones((2 * radius + 1, 2 * radius + 1), dtype=bool)
+    return binary_dilation(mask > 0, structure=struct)
+
+
+def scribble_overlay(img: np.ndarray, signals_per_class: dict,
+                     scribble_radius: int = 3) -> np.ndarray:
     """
     Overlay accumulated scribbles: fg scribbles in class colour, bg scribbles in white.
     signal shape: [2, H, W], ch0=fg, ch1=bg.
+    Strokes are thickened by scribble_radius pixels for visibility.
     """
     out = img.copy()
     for cls in CLASS_PRIORITY:
@@ -243,8 +252,8 @@ def scribble_overlay(img: np.ndarray, signals_per_class: dict) -> np.ndarray:
         if sig is None:
             continue
         color = CLASS_COLORS[cls]
-        fg_px = sig[0] > 0
-        bg_px = sig[1] > 0
+        fg_px = _dilate(sig[0], scribble_radius)
+        bg_px = _dilate(sig[1], scribble_radius)
         for c in range(3):
             out[:, :, c] = np.where(fg_px, color[c], out[:, :, c])
         out[bg_px] = [1.0, 1.0, 1.0]   # bg scribbles white
@@ -325,14 +334,21 @@ def plot_grid(image_np, gt_per_class, snapshots_per_class,
 # ── Animation ─────────────────────────────────────────────────────────────────
 
 def make_animation(image_np, all_masks_per_class, all_signals_per_class,
-                   available_classes, out_path: Path, fps: int = 3):
+                   available_classes, gt_per_class: dict,
+                   out_path: Path, fps: int = 1):
     """
-    20-frame GIF: left panel = combined mask overlay, right panel = scribble overlay.
+    20-frame GIF with 3 panels:
+      left   – GT (static, for reference)
+      middle – combined prediction at current iteration
+      right  – accumulated scribbles at current iteration
     """
     n_iters = len(next(iter(all_masks_per_class.values())))
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+    fig, (ax_gt, ax_pred, ax_sig) = plt.subplots(1, 3, figsize=(15, 5))
     fig.subplots_adjust(wspace=0.05)
+
+    # Pre-render the static GT frame once
+    gt_frame = combined_overlay(image_np, gt_per_class)
 
     def _pred_frame(it):
         return combined_overlay(image_np,
@@ -346,11 +362,15 @@ def make_animation(image_np, all_masks_per_class, all_signals_per_class,
                                  for cls in available_classes
                                  if cls in all_signals_per_class})
 
-    im1 = ax1.imshow(_pred_frame(0))
-    im2 = ax2.imshow(_sig_frame(0))
-    ax1.set_title('Prediction', fontsize=11)
-    ax2.set_title('Accumulated scribbles', fontsize=11)
-    ax1.axis('off'); ax2.axis('off')
+    ax_gt.imshow(gt_frame)           # static — no update needed
+    im_pred = ax_pred.imshow(_pred_frame(0))
+    im_sig  = ax_sig.imshow(_sig_frame(0))
+
+    ax_gt.set_title('Ground truth', fontsize=11, fontweight='bold')
+    ax_pred.set_title('Prediction',  fontsize=11)
+    ax_sig.set_title('Accumulated scribbles', fontsize=11)
+    for ax in (ax_gt, ax_pred, ax_sig):
+        ax.axis('off')
     ttl = fig.suptitle('Iteration 1 / 20', fontsize=12)
 
     # Legend
@@ -360,10 +380,11 @@ def make_animation(image_np, all_masks_per_class, all_signals_per_class,
                fontsize=9, bbox_to_anchor=(0.5, 0.0), framealpha=0.85)
 
     def update(frame):
-        im1.set_data(_pred_frame(frame))
-        im2.set_data(_sig_frame(frame))
+        # GT panel stays constant — no set_data needed
+        im_pred.set_data(_pred_frame(frame))
+        im_sig.set_data(_sig_frame(frame))
         ttl.set_text(f'Iteration {frame + 1} / {n_iters}')
-        return [im1, im2, ttl]
+        return [im_pred, im_sig, ttl]
 
     anim = FuncAnimation(fig, update, frames=n_iters, interval=1000 // fps, blit=True)
     anim.save(str(out_path), writer=PillowWriter(fps=fps))
@@ -456,7 +477,7 @@ def main():
         if args.animate:
             anim_path = out_dir / f'sample_{sample_i:02d}_{stem}_anim.gif'
             make_animation(image_np, all_masks_per_class, all_signals_per_class,
-                           available_classes, anim_path, fps=3)
+                           available_classes, gt_per_class, anim_path)
 
     print(f"\nAll done. Results → {out_dir}/")
 
