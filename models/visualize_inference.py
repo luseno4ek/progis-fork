@@ -195,8 +195,11 @@ def run_inference(model, image_t, gt_mask_t, init_signal_t, device, n_iters=20):
         u_sig = torch.bitwise_or(sig.to(torch.uint8), u_sig.to(torch.uint8)).float()
         prev  = (pred > 0.5).float()
 
-    snapshots = [all_masks[i] for i in SNAPSHOT_ITERS]
-    return snapshots, all_masks, all_signals
+    # Pick 5 evenly-spaced snapshot indices regardless of n_iters
+    n = len(all_masks)
+    snap_indices = sorted(set([0, n // 4, n // 2, 3 * n // 4, n - 1]))
+    snapshots = [all_masks[i] for i in snap_indices]
+    return snapshots, snap_indices, all_masks, all_signals
 
 
 # ── Overlay helpers ───────────────────────────────────────────────────────────
@@ -263,21 +266,22 @@ def scribble_overlay(img: np.ndarray, signals_per_class: dict,
 # ── Grid figure ───────────────────────────────────────────────────────────────
 
 def plot_grid(image_np, gt_per_class, snapshots_per_class,
-              available_classes, out_path: Path):
+              available_classes, snap_indices: list, out_path: Path):
     """
     Layout (columns per row):
       col 0   : combined overlay
       col 1…K : per-class overlays
 
     Rows:
-      row 0        : original image (full width) + legend
-      row 1        : GT
-      row 2…6      : iter 1, 5, 10, 15, 20
+      row 0      : original image (full width) + legend
+      row 1      : GT
+      row 2…N+1  : one row per snapshot (iter numbers from snap_indices)
     """
     n_cls  = len(available_classes)
     n_cols = 1 + n_cls
-    # rows: [original row] + [GT row] + [5 snapshot rows]
-    n_rows = 1 + 1 + len(SNAPSHOT_ITERS)
+    n_snaps = len(snap_indices)
+    # rows: [original row] + [GT row] + [snapshot rows]
+    n_rows = 1 + 1 + n_snaps
 
     fig = plt.figure(figsize=(3.2 * n_cols, 3.0 * n_rows))
 
@@ -296,11 +300,11 @@ def plot_grid(image_np, gt_per_class, snapshots_per_class,
                    framealpha=0.8, ncol=len(available_classes))
 
     # ── Rows 1…: GT + snapshots ───────────────────────────────────────────────
-    row_labels  = ['GT'] + [f'iter {SNAPSHOT_ITERS[i]+1}' for i in range(len(SNAPSHOT_ITERS))]
-    masks_rows  = [gt_per_class] + [
+    row_labels = ['GT'] + [f'iter {idx + 1}' for idx in snap_indices]
+    masks_rows = [gt_per_class] + [
         {cls: snapshots_per_class[cls][snap_i] for cls in available_classes
          if cls in snapshots_per_class}
-        for snap_i in range(len(SNAPSHOT_ITERS))
+        for snap_i in range(n_snaps)
     ]
 
     for row_i, (row_label, masks_dict) in enumerate(zip(row_labels, masks_rows)):
@@ -461,19 +465,19 @@ def main():
             mask_t   = torch.tensor(mask_np,   dtype=torch.float32).unsqueeze(0)
             signal_t = torch.tensor(signal_np, dtype=torch.float32)
 
-            snaps, all_masks, all_sigs = run_inference(
+            snaps, snap_indices, all_masks, all_sigs = run_inference(
                 model, image_t, mask_t, signal_t, device, n_iters=args.n_iters
             )
 
-            gt_per_class[cls]        = mask_np
-            snapshots_per_class[cls] = snaps          # list of 5 numpy [H,W]
-            all_masks_per_class[cls] = all_masks      # list of 20 numpy [H,W]
-            all_signals_per_class[cls] = all_sigs     # list of 20 numpy [2,H,W]
+            gt_per_class[cls]          = mask_np
+            snapshots_per_class[cls]   = snaps       # list of N numpy [H,W]
+            all_masks_per_class[cls]   = all_masks   # list of n_iters numpy [H,W]
+            all_signals_per_class[cls] = all_sigs    # list of n_iters numpy [2,H,W]
 
         stem = Path(fname).stem
         grid_path = out_dir / f'sample_{sample_i:02d}_{stem}_grid.png'
         plot_grid(image_np, gt_per_class, snapshots_per_class,
-                  available_classes, grid_path)
+                  available_classes, snap_indices, grid_path)
 
         if args.animate:
             anim_path = out_dir / f'sample_{sample_i:02d}_{stem}_anim.gif'
