@@ -2,7 +2,6 @@
 #不对特征上采样，最后对预测的mask进行上采样
 from efficientunet import *
 import torch.optim.lr_scheduler as lr_scheduler
-import time
 import os
 import numpy as np
 import torch
@@ -191,6 +190,81 @@ def processMasks(pred_mask_all, GT_mask_all):
          
     return output, centers
 
+
+# ── GPU-accelerated processMasks with centroid output (replaces CPU version in inference) ──
+
+def _edt_skeleton_gpu(mask, max_steps=80):
+    """EDT-ridge skeleton, fully on GPU, zero CPU-GPU syncs inside loop."""
+    B = mask.shape[0]
+    device = mask.device
+    edt = torch.zeros_like(mask)
+    current = mask.clone()
+    for step in range(1, max_steps + 1):
+        next_c = -F.max_pool2d(-current, kernel_size=3, stride=1, padding=1)
+        newly_removed = (current > 0) & (next_c == 0)
+        edt = edt + newly_removed.float() * step
+        current = next_c
+    edt = edt + (current > 0).float() * (max_steps + 1)
+    mask_bool = mask > 0
+    edt_in_mask = edt * mask
+    n_pixels = mask.flatten(1).sum(1).clamp(min=1)
+    edt_sum = edt_in_mask.flatten(1).sum(1)
+    edt_sq  = edt_in_mask.pow(2).flatten(1).sum(1)
+    means = edt_sum / n_pixels
+    stds  = (edt_sq / n_pixels - means.pow(2)).clamp(min=0).sqrt()
+    rand   = torch.rand(B, 1, 1, 1, device=device)
+    thresh = (means.view(B,1,1,1) - stds.view(B,1,1,1)
+              + rand * 2 * stds.view(B,1,1,1)).clamp(min=0)
+    core = (edt > thresh) & mask_bool
+    need_fallback = (core.float().flatten(1).sum(1) == 0) & (mask.flatten(1).sum(1) > 0)
+    max_edt = (edt * mask).flatten(1).max(1).values.view(B, 1, 1, 1)
+    fallback_core = (edt >= max_edt - 1e-6) & mask_bool
+    core = torch.where(need_fallback.view(B, 1, 1, 1), fallback_core, core)
+    core_edt  = edt * core.float()
+    local_max = F.max_pool2d(core_edt, kernel_size=3, stride=1, padding=1)
+    ridge = (core_edt >= local_max - 1e-6) & core
+    empty_ridge = (ridge.float().flatten(1).sum(1) == 0) & (core.float().flatten(1).sum(1) > 0)
+    ridge = torch.where(empty_ridge.view(B, 1, 1, 1), core, ridge)
+    return ridge.float()
+
+
+def processMasks_gpu(pred_mask_all, GT_mask_all, max_edt_steps=80):
+    """
+    GPU drop-in for processMasks. Returns (signal [B,2,H,W], centers list).
+    centers[b] = (cy, cx) int tuple, or None if no error region for sample b.
+    Replaces CPU processMasks in the inference loop — eliminates scipy/skimage bottleneck.
+    """
+    device = pred_mask_all.device
+    B, _, H, W = pred_mask_all.shape
+
+    pred_bin = (pred_mask_all > 0.5).float()
+    fg = ((GT_mask_all == 1) & (pred_bin == 0)).float()
+    bg = ((GT_mask_all == 0) & (pred_bin == 1)).float()
+
+    fg_area = fg.flatten(1).sum(1)
+    bg_area = bg.flatten(1).sum(1)
+    use_fg  = (fg_area >= bg_area).float().view(B, 1, 1, 1)
+
+    selected = fg * use_fg + bg * (1 - use_fg)          # [B, 1, H, W]
+    skel     = _edt_skeleton_gpu(selected, max_edt_steps)
+
+    output = torch.zeros(B, 2, H, W, device=device)
+    output[:, 0:1] = skel * use_fg
+    output[:, 1:2] = skel * (1 - use_fg)
+
+    # Compute centroids of selected error regions (vectorised, 3 tiny syncs total)
+    ys = torch.arange(H, device=device).float().view(1, 1, H, 1)
+    xs = torch.arange(W, device=device).float().view(1, 1, 1, W)
+    n  = selected.flatten(1).sum(1).clamp(min=1)
+    cy = (selected * ys).flatten(1).sum(1) / n
+    cx = (selected * xs).flatten(1).sum(1) / n
+    has_region = selected.flatten(1).sum(1) > 0
+    cy_list  = cy.round().long().tolist()
+    cx_list  = cx.round().long().tolist()
+    has_list = has_region.tolist()
+    centers = [(cy_list[b], cx_list[b]) if has_list[b] else None for b in range(B)]
+
+    return output, centers
 
 
 ##########################################################################################################
@@ -988,26 +1062,13 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
 
         with torch.no_grad():
 
-            elapsed_time = 0
             for images, aux_inputs, masks, superpixels, filenames in tqdm(val_loader, desc=f'threod={threod:.2f}', leave=True):
                 images, aux_inputs, masks, superpixels= images.to(device), aux_inputs.to(device), masks.to(device), superpixels.to(device)
                 # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
                 roi_input , roi_aux_input , roi_suppixel , roi_mask , mask_box, all_aux_inputs, centers_1= ROI_crop_signal_line(images , aux_inputs, superpixels, masks)
             
 
-                # 开始计时
-                torch.cuda.synchronize()  # 确保前面的操作已完成
-                start_time = time.time()
-                
-                # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
                 all_perpixel_features , pre_masks ,nuclick_out , all_pixel_features, out_mask_normalized , superpixels = model(roi_input , roi_aux_input , roi_suppixel, images, aux_inputs, superpixels, mask_box, threod)
-                
-                # 结束计时
-                torch.cuda.synchronize()  # 确保代码运行完成
-                end_time = time.time()
-
-                # 计算运行时间
-                elapsed_time += (end_time - start_time)
                 
                 #############################################  迭代  ############################################
                 # pre_masks = torch.zeros_like(masks).to(device)
@@ -1020,7 +1081,7 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
                 count = 0
             
                     
-                signal, centers = processMasks(out_put, masks)
+                signal, centers = processMasks_gpu(out_put, masks)
                 union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
                 
                 # union_signal = all_aux_inputs
@@ -1030,7 +1091,7 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
                     if count > 0:
                         out_put = pre_masks
                         
-                        signal, centers = processMasks(out_put, masks)
+                        signal, centers = processMasks_gpu(out_put, masks)
                         union_signal = torch.bitwise_or(signal.to(torch.uint8), union_signal.to(torch.uint8))
                     
                     # 假设 outputs 和 masks 的形状都是 (batch_size, 1, H, W)
@@ -1254,7 +1315,7 @@ threod_sim_list = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85]
 
 val_base    = RoISegDataset(PATCHES_DIR, SPLITS_JSON, fold=FOLD, split='val', cls=CLS)
 val_dataset = InferenceDataset(val_base)
-val_loader  = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
+val_loader  = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=8, pin_memory=True)
 
 for threod_sim in threod_sim_list:
     dice, iou, acc = train_model(model, val_loader, epochs=1, threod=threod_sim,
