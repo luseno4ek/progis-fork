@@ -22,9 +22,9 @@ from torchvision import models
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
 
-from scipy.ndimage.morphology import distance_transform_edt
+from scipy.ndimage import distance_transform_edt
 import scipy.ndimage as ndi
-from skimage.morphology import skeletonize_3d
+from skimage.morphology import skeletonize
 from scipy.ndimage import label
 
 from skimage.measure import label as label_1
@@ -89,7 +89,7 @@ def generateGuidingSignal(binaryMask):
             newMask = binaryMask
 
         # Skeletonize (use skimage and convert back to tensor)
-        skel = skeletonize_3d(newMask.cpu().numpy())
+        skel = skeletonize(newMask.cpu().numpy())
         skel = torch.tensor(skel, dtype=torch.float32, device=binaryMask.device)
     else:
         skel = torch.zeros_like(binaryMask, dtype=torch.float32, device=binaryMask.device)
@@ -656,7 +656,7 @@ def generateGuidingSignal_1(mask, RandomizeGuidingSignalType):
                 newMask = binaryMask
 
             # Skeletonize (use skimage and convert back to tensor)
-            skel = skeletonize_3d(newMask.cpu().numpy())
+            skel = skeletonize(newMask.cpu().numpy())
             skel = torch.tensor(skel, dtype=torch.float32, device=mask.device)
         else:
             skel = torch.zeros_like(binaryMask, dtype=torch.float32).unsqueeze(-1)
@@ -987,9 +987,9 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
         
 
         with torch.no_grad():
-            
+
             elapsed_time = 0
-            for images, aux_inputs, masks, superpixels, filenames in val_loader:
+            for images, aux_inputs, masks, superpixels, filenames in tqdm(val_loader, desc=f'threod={threod:.2f}', leave=True):
                 images, aux_inputs, masks, superpixels= images.to(device), aux_inputs.to(device), masks.to(device), superpixels.to(device)
                 # outputs, all_superpixel_features = model(images, aux_inputs, superpixels)
                 roi_input , roi_aux_input , roi_suppixel , roi_mask , mask_box, all_aux_inputs, centers_1= ROI_crop_signal_line(images , aux_inputs, superpixels, masks)
@@ -1046,8 +1046,10 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
 
                     for b in range(batch_size):
                         # 计算裁剪的边界，中心坐标为正方形框的中心
-                        start_y = max(centers[b][0] - 128, 0)
-                        start_x = max(centers[b][1] - 128, 0)
+                        # centers[b] is None when prediction is perfect (no error region) -> use image center
+                        center_b = centers[b] if centers[b] is not None else (H // 2, W // 2)
+                        start_y = max(center_b[0] - 128, 0)
+                        start_x = max(center_b[1] - 128, 0)
                         end_y = min(start_y + 256, H)
                         end_x = min(start_x + 256, W)
 
@@ -1100,8 +1102,10 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
                     
                     for b in range(batch_size):
                         # 计算裁剪的边界，中心坐标为正方形框的中心
-                        start_y = max(centers[b][0] - 128, 0)
-                        start_x = max(centers[b][1] - 128, 0)
+                        # centers[b] is None when prediction is perfect (no error region) -> use image center
+                        center_b = centers[b] if centers[b] is not None else (H // 2, W // 2)
+                        start_y = max(center_b[0] - 128, 0)
+                        start_x = max(center_b[1] - 128, 0)
                         end_y = min(start_y + 256, H)
                         end_x = min(start_x + 256, W)
 
