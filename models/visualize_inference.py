@@ -335,7 +335,7 @@ def plot_grid(image_np, gt_per_class, snapshots_per_class,
 
 def make_animation(image_np, all_masks_per_class, all_signals_per_class,
                    available_classes, gt_per_class: dict,
-                   out_path: Path, fps: int = 1):
+                   out_path: Path, fps: int = 2):
     """
     20-frame GIF with 3 panels:
       left   – GT (static, for reference)
@@ -386,7 +386,8 @@ def make_animation(image_np, all_masks_per_class, all_signals_per_class,
         ttl.set_text(f'Iteration {frame + 1} / {n_iters}')
         return [im_pred, im_sig, ttl]
 
-    anim = FuncAnimation(fig, update, frames=n_iters, interval=1000 // fps, blit=True)
+    # blit=False required for PillowWriter: blit=True skips frame 0 when saving to GIF
+    anim = FuncAnimation(fig, update, frames=n_iters, interval=1000 // fps, blit=False)
     anim.save(str(out_path), writer=PillowWriter(fps=fps))
     plt.close(fig)
     print(f"  Animation saved → {out_path}")
