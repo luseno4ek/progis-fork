@@ -7,10 +7,10 @@ runs 20-iteration inference for each class, and produces:
   2. (opt) GIF: animated mask+scribble overlay for all 20 iterations
 
 Usage (from project root):
-    python models/visualize_inference.py \\
-        --checkpoint data/patches/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best.pth \\
-        --patches_dir data/patches \\
-        --splits_json data/processed/fold_splits.json \\
+    python models/visualize_inference.py \
+        --checkpoint /srv/data1/data_repository/BCSS/patches/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.9772_epoch19.pth \
+        --patches_dir /srv/data1/data_repository/BCSS/patches \
+        --splits_json /srv/data1/data_repository/BCSS/patches/fold_splits.json \
         --fold 1 --n_samples 2 --animate
 """
 

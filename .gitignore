@@ -59,6 +59,7 @@ Gastric/
 */image_npy/
 */mask_npy/
 */signal_*/
+visualizations/
 
 # Model checkpoints and weights
 *.pth

@@ -385,8 +385,8 @@ def get_fg_filenames(images_dir, masks_dir):
 
 # ── Configuration ────────────────────────────────────────────────────────────
 FOLD        = 1
-PATCHES_DIR = "../data/patches"
-SPLITS_JSON = "../data/patches/fold_splits.json"
+PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
+SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 CLS         = 'tumor'       # class used for contrastive learning
 N_SEGMENTS  = 500
 # ─────────────────────────────────────────────────────────────────────────────

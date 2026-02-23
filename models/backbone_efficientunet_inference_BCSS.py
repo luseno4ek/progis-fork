@@ -1036,7 +1036,7 @@ def get_filenames_from_folder(folder_path):
 
 
 # Training function
-def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
+def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1", results_dir=""):
     best_dice = 0.0
     
     model.to(device)
@@ -1217,7 +1217,7 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
                     
                     # mean_IoU_list.append(iou_scores)
             
-            fold_dir = f'/data_nas2/gjs/ISF_pixel_level_data/BCSS_x10_reinhard_cut/125WSI/fold_{fold}/efficientUnet/results' 
+            fold_dir = results_dir 
             os.makedirs(fold_dir, exist_ok=True)    
             filename_iou = f"{fold_dir}/iou_{cls_num}_thr{threod}.pkl" #  指定文件名
             filename_acc = f"{fold_dir}/acc_{cls_num}_thr{threod}.pkl" #  指定文件名
@@ -1268,11 +1268,12 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1"):
 # ── Config ────────────────────────────────────────────────────────────────────
 FOLD        = 1
 CLS         = 'all'
-PATCHES_DIR = '../data/patches'
-SPLITS_JSON = '../data/processed/fold_splits.json'
+PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
+SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 # Checkpoint: trained ROI-Seg model — update path to your best checkpoint
 # e.g. ../data/patches/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.XXXX_epochN.pth
-ROI_CKPT    = '../data/patches/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.4354_epoch1.pth'
+ROI_CKPT    = PATCHES_DIR + '/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.9772_epoch19.pth'
+RESULTS_DIR    = PATCHES_DIR + '/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.9772_epoch19/results'
 # ─────────────────────────────────────────────────────────────────────────────
 
 from dataset import RoISegDataset
@@ -1319,7 +1320,7 @@ val_loader  = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=
 
 for threod_sim in threod_sim_list:
     dice, iou, acc = train_model(model, val_loader, epochs=1, threod=threod_sim,
-                                 fold=FOLD, cls_num=CLS)
+                                 fold=FOLD, cls_num=CLS, results_dir=RESULTS_DIR)
     print(f"threod={threod_sim:.2f} | Dice@20={dice:.4f}  mIoU@20={iou:.4f}  Acc={acc:.4f}")
 
 torch.cuda.empty_cache()

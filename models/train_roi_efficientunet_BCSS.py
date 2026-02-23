@@ -632,8 +632,8 @@ def get_filenames_from_folder(folder_path):
 
 # ── Configuration ────────────────────────────────────────────────────────────
 FOLD        = 1
-PATCHES_DIR = "../data/patches"
-SPLITS_JSON = "../data/patches/fold_splits.json"
+PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
+SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 CLS         = 'all'         # 'all' = все классы (как в статье), или 'tumor', 'stroma', etc.
 GPU_ID      = 1             # CUDA device index (0, 1, 2, ...)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -681,7 +681,7 @@ loss_fn = nn.BCELoss()
 # Training function
 def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50):
     best_dice = 0.0
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = f'cuda:{GPU_ID}' if torch.cuda.is_available() else 'cpu'
     model.to(device)
     tb_dir = f'{PATCHES_DIR}/fold_{FOLD}/runs/fold{FOLD}_{CLS}'
     writer = SummaryWriter(log_dir=tb_dir)
