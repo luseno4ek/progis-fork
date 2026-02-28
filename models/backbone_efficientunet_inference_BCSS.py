@@ -587,6 +587,87 @@ class EfficientUNet_proto(nn.Module):
         # return  x , out_mask , seg_orginal , fg_proto_feature 
     
     
+class SimCLRProto(nn.Module):
+    """
+    ProGIS prototype model using SimCLR ResNet50 as feature extractor.
+
+    Replaces EfficientUNet_backbone with frozen SimCLR histology features.
+    Stage 1 contrastive training is skipped — SimCLR is already pretrained
+    on 2M TCGA-BRCA patches with self-supervised contrastive learning.
+
+    The forward pass is identical to EfficientUNet_proto; only the backbone
+    call changes: self.feature_extractor(input) instead of
+    self.EfficientUNet_backbone(input).
+    """
+    def __init__(self):
+        super().__init__()
+        self.feature_extractor = SimCLRFeatureExtractor(proj_channels=32)
+        self.segment_part = get_efficientunet_b0(
+            out_channels=1, concat_input=True, pretrained=False, backbone=False
+        )
+
+    def forward(self, roi_input, roi_aux_input, roi_suppixel,
+                input, aux_input, superpixels, mask_box, threod):
+        pred_mask = torch.zeros_like(roi_suppixel)
+        roiseg_input = torch.cat((roi_input, pred_mask, roi_aux_input), dim=1)
+        seg_orginal = self.segment_part(roiseg_input)
+
+        x = self.feature_extractor(input)   # [B, 32, H, W] — histology features
+
+        fg_sigmoid_output = seg_orginal.clone()
+        mask_greater_than_0_6 = fg_sigmoid_output > 0.95
+        mask_less_equal_0_6   = fg_sigmoid_output <= 0.95
+        fg_sigmoid_output[mask_greater_than_0_6] = 1
+        fg_sigmoid_output[mask_less_equal_0_6]   = 0
+
+        crop_size = 256
+        mask_box = mask_box.squeeze(1)
+        x_cropped = x * mask_box.unsqueeze(1)
+
+        cropped_regions = []
+        for i in range(x.shape[0]):
+            mask_i = mask_box[i]
+            feature_map = x_cropped[i]
+            nonzero_coords = torch.nonzero(mask_i, as_tuple=True)
+            if len(nonzero_coords[0]) > 0:
+                center_y = (nonzero_coords[0].min() + nonzero_coords[0].max()) // 2
+                center_x = (nonzero_coords[1].min() + nonzero_coords[1].max()) // 2
+                start_y = max(0, center_y - crop_size // 2)
+                start_x = max(0, center_x - crop_size // 2)
+                start_y = min(start_y, feature_map.shape[1] - crop_size)
+                start_x = min(start_x, feature_map.shape[2] - crop_size)
+                end_y = start_y + crop_size
+                end_x = start_x + crop_size
+                cropped = feature_map[:, start_y:end_y, start_x:end_x]
+            else:
+                cropped = torch.zeros(
+                    (x.shape[1], crop_size, crop_size), dtype=x.dtype, device=x.device
+                )
+            cropped_regions.append(cropped)
+
+        output_tensor = torch.stack(cropped_regions, dim=0)
+
+        foreground_features = output_tensor * fg_sigmoid_output
+        foreground_pixel_count = fg_sigmoid_output.sum(dim=(2, 3), keepdim=True).clamp(min=1)
+        fg_avg_features = foreground_features.sum(dim=(2, 3), keepdim=True) / foreground_pixel_count
+        fg_avg_features = fg_avg_features.squeeze(3).squeeze(2)
+
+        x_normalized         = F.normalize(x, dim=1)
+        prototype_normalized = F.normalize(fg_avg_features, dim=1)
+        out_mask = (torch.einsum('bchw,bc->bhw', x_normalized, prototype_normalized)) ** 2
+
+        out_mask = out_mask.unsqueeze(1)
+        min_val = out_mask.min()
+        max_val = out_mask.max()
+        out_mask_normalized = (out_mask - min_val) / (max_val - min_val + 1e-6)
+
+        out_mask_thresh = out_mask_normalized.clone()
+        out_mask_thresh[out_mask_thresh <= threod] = 0
+        out_mask_thresh[out_mask_thresh > threod]  = 1
+
+        return x, out_mask_thresh, fg_sigmoid_output, x, out_mask_normalized, superpixels
+
+
 def ROI_crop(input, aux_input, superpixel, mask):
     # 假设 input 和 aux_input 的形状分别为 (batch_size, 3, H, W) 和 (batch_size, 2, H, W)
     batch_size, _, H, W = input.shape
@@ -1271,12 +1352,22 @@ CLS         = 'all'
 PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
 SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 # Checkpoint: trained ROI-Seg model — update path to your best checkpoint
-# e.g. ../data/patches/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.XXXX_epochN.pth
 ROI_CKPT    = PATCHES_DIR + '/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.9772_epoch19.pth'
-RESULTS_DIR    = PATCHES_DIR + '/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.9772_epoch19/results'
+
+# ── Backbone selection ────────────────────────────────────────────────────────
+# USE_SIMCLR = True  → SimCLR ResNet50 pretrained on TCGA-BRCA histology
+#                       (no Stage 1 training needed, requires timm)
+# USE_SIMCLR = False → EfficientUNet-B0 with ImageNet weights (original)
+USE_SIMCLR  = True
 # ─────────────────────────────────────────────────────────────────────────────
 
+_backbone_tag = 'simclr' if USE_SIMCLR else 'efficientunet'
+RESULTS_DIR = (PATCHES_DIR
+               + '/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.9772_epoch19'
+               + f'/results_{_backbone_tag}')
+
 from dataset import RoISegDataset
+from simclr_feature_extractor import SimCLRFeatureExtractor
 
 class InferenceDataset(torch.utils.data.Dataset):
     """Wraps RoISegDataset to match inference loader format:
@@ -1298,9 +1389,14 @@ class InferenceDataset(torch.utils.data.Dataset):
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Model: ImageNet pretrained backbone (pretrained=True set in __init__)
-#        + our trained ROI-Seg (segment_part)
-model = EfficientUNet_proto()
+# Model: backbone (frozen) + our trained ROI-Seg (segment_part)
+if USE_SIMCLR:
+    print("Backbone: SimCLR ResNet50 (TCGA-BRCA histology, frozen)")
+    model = SimCLRProto()
+else:
+    print("Backbone: EfficientUNet-B0 (ImageNet pretrained, frozen)")
+    model = EfficientUNet_proto()
+
 model.segment_part.load_state_dict(torch.load(ROI_CKPT, map_location='cpu'))
 print(f"Loaded ROI-Seg checkpoint: {ROI_CKPT}")
 

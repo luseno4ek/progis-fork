@@ -20,3 +20,4 @@ efficientnet-pytorch>=0.7.1
 # Дополнительные утилиты
 Pillow>=9.5.0
 thop>=0.1.1
+timm>=0.9.0
