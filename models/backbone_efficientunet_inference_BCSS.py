@@ -1359,6 +1359,10 @@ ROI_CKPT    = PATCHES_DIR + '/fold_1/ROI_ckpt/BCSS_effi-Unet_roi_best_dice0.9772
 #                       (no Stage 1 training needed, requires timm)
 # USE_SIMCLR = False → EfficientUNet-B0 with ImageNet weights (original)
 USE_SIMCLR  = True
+
+# Trained projection head checkpoint (None = random init, set path after training)
+# Train with: python train_simclr_proj.py
+PROJ_CKPT   = PATCHES_DIR + '/fold_1/simclr_proj/proj_best.pth'
 # ─────────────────────────────────────────────────────────────────────────────
 
 _backbone_tag = 'simclr' if USE_SIMCLR else 'efficientunet'
@@ -1399,6 +1403,14 @@ else:
 
 model.segment_part.load_state_dict(torch.load(ROI_CKPT, map_location='cpu'))
 print(f"Loaded ROI-Seg checkpoint: {ROI_CKPT}")
+
+if USE_SIMCLR and PROJ_CKPT and os.path.exists(PROJ_CKPT):
+    model.feature_extractor.proj.load_state_dict(
+        torch.load(PROJ_CKPT, map_location='cpu')
+    )
+    print(f"Loaded trained projection head: {PROJ_CKPT}")
+else:
+    print("Projection head: random initialization (no checkpoint found)")
 
 for param in model.parameters():
     param.requires_grad = False

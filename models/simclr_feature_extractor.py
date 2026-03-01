@@ -8,7 +8,11 @@ Provides per-pixel features [B, proj_channels, H, W] for ProGIS prototype
 matching. The encoder is fully frozen — Stage 1 contrastive training is not
 needed because SimCLR already provides good histology representations.
 
-Only the small 1×1 projection head (2048 → proj_channels) is a new layer.
+Uses ResNet50 stage 2 (out_indices=[2]) for better spatial resolution:
+  - stage 2: H/8, 512 channels  → 64×64 for 512×512 input  ← used
+  - stage 4: H/32, 2048 channels → 16×16 for 512×512 input  (too coarse)
+
+Only the small 1×1 projection head (512 → proj_channels) is a new layer.
 
 Usage:
     extractor = SimCLRFeatureExtractor(proj_channels=32)
@@ -27,9 +31,9 @@ class SimCLRFeatureExtractor(nn.Module):
 
     Architecture:
         ResNet50 encoder (frozen, SimCLR pretrained on TCGA-BRCA)
-        → [B, 2048, H/32, W/32]   (last ResNet50 stage)
-        → Conv2d(2048, proj_channels, 1)  [trainable projection]
-        → [B, proj_channels, H/32, W/32]
+        → [B, 512, H/8, W/8]   (stage 2, better spatial resolution)
+        → Conv2d(512, proj_channels, 1)  [trainable projection]
+        → [B, proj_channels, H/8, W/8]
         → bilinear upsample to input (H, W)
         → [B, proj_channels, H, W]
 
@@ -40,13 +44,15 @@ class SimCLRFeatureExtractor(nn.Module):
     # ImageNet normalization used by the SimCLR model
     _MEAN = [0.485, 0.456, 0.406]
     _STD  = [0.229, 0.224, 0.225]
+    # Number of output channels from the selected ResNet50 stage
+    _STAGE_CHANNELS = 512   # out_indices=[2] → layer2 output
 
     def __init__(self, proj_channels: int = 32):
         super().__init__()
         self.encoder = self._build_encoder()
 
-        # 1×1 projection: 2048 → proj_channels
-        self.proj = nn.Conv2d(2048, proj_channels, kernel_size=1, bias=False)
+        # 1×1 projection: 512 → proj_channels
+        self.proj = nn.Conv2d(self._STAGE_CHANNELS, proj_channels, kernel_size=1, bias=False)
 
         # Normalization buffers — move automatically with .to(device)
         self.register_buffer('mean', torch.tensor(self._MEAN).view(1, 3, 1, 1))
@@ -65,7 +71,7 @@ class SimCLRFeatureExtractor(nn.Module):
             "hf-hub:1aurent/resnet50.tcga_brca_simclr",
             pretrained=True,
             features_only=True,
-            out_indices=[4],   # last ResNet50 stage → [B, 2048, H/32, W/32]
+            out_indices=[2],   # stage 2 → [B, 512, H/8, W/8]  (64×64 for 512 input)
         )
         # Freeze encoder: no gradient, no update
         for p in encoder.parameters():
@@ -85,10 +91,10 @@ class SimCLRFeatureExtractor(nn.Module):
 
         # Frozen encoder forward (no gradient through encoder)
         with torch.no_grad():
-            feat = self.encoder(x_norm)[0]   # [B, 2048, H/32, W/32]
+            feat = self.encoder(x_norm)[0]   # [B, 512, H/8, W/8]
 
         # Project to low-dim space (gradient flows here)
-        feat = self.proj(feat)               # [B, proj_channels, H/32, W/32]
+        feat = self.proj(feat)               # [B, proj_channels, H/8, W/8]
 
         # Upsample back to input resolution
         feat = F.interpolate(feat, size=(H, W), mode='bilinear', align_corners=False)
