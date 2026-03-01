@@ -35,7 +35,7 @@ from simclr_feature_extractor import SimCLRFeatureExtractor
 FOLD          = 1
 PATCHES_DIR   = "/srv/data1/data_repository/BCSS/patches"
 SPLITS_JSON   = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
-CLS           = 'tumor'       # class used for fg/bg definition
+CLS           = 'all'         # train on all tissue classes (tumor/stroma/etc.)
 EPOCHS        = 20
 LR            = 4e-4
 BATCH_SIZE    = 32
@@ -45,11 +45,18 @@ CKPT_DIR      = f"{PATCHES_DIR}/fold_{FOLD}/simclr_proj"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+ALL_CLASSES = ['tumor', 'stroma', 'inflammatory_infiltration', 'necrosis', 'others']
+
+
 class ImageMaskDataset(Dataset):
     """
     Minimal dataset: loads image + binary mask only. No superpixels needed.
 
-    Paths (same layout as ContrastDataset):
+    Supports cls='all' to load patches from all tissue classes — important
+    so the projection head learns fg/bg separation for every tissue type,
+    not just tumor.
+
+    Paths:
       images: patches_dir / all / image_npy / <fname>
       masks:  patches_dir / <cls> / mask_npy / <fname>
 
@@ -69,24 +76,31 @@ class ImageMaskDataset(Dataset):
             stem = Path(fname).stem
             return stem.rsplit('_patch', 1)[0] if '_patch' in stem else stem
 
-        mask_dir = patches_dir / cls / 'mask_npy'
-        self.filenames = [
-            f.name for f in sorted(mask_dir.glob('*.npy'))
-            if wsi_stem(f.name) in valid_stems
-        ]
-        self.image_dir = patches_dir / 'all' / 'image_npy'
-        self.mask_dir  = mask_dir
+        classes = ALL_CLASSES if cls == 'all' else [cls]
+
+        # Each item: (fname, class_name) — class needed to locate mask file
+        self.items: list[tuple[str, str]] = []
+        for c in classes:
+            mask_dir = patches_dir / c / 'mask_npy'
+            if not mask_dir.exists():
+                continue
+            for f in sorted(mask_dir.glob('*.npy')):
+                if wsi_stem(f.name) in valid_stems:
+                    self.items.append((f.name, c))
+
+        self.patches_dir = patches_dir
+        self.image_dir   = patches_dir / 'all' / 'image_npy'
 
         print(f"ImageMaskDataset | fold={fold} {split} | cls={cls} | "
-              f"{len(self.filenames)} patches")
+              f"{len(self.items)} patches")
 
     def __len__(self):
-        return len(self.filenames)
+        return len(self.items)
 
     def __getitem__(self, idx):
-        fname = self.filenames[idx]
-        image = np.load(self.image_dir / fname)          # [H, W, 3]
-        mask  = np.load(self.mask_dir  / fname)          # [H, W]
+        fname, cls = self.items[idx]
+        image = np.load(self.image_dir / fname)                            # [H, W, 3]
+        mask  = np.load(self.patches_dir / cls / 'mask_npy' / fname)      # [H, W]
         image = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32)
         mask  = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
         return image, mask
