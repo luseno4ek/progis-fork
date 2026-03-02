@@ -18,8 +18,13 @@ import argparse
 import sys
 from pathlib import Path
 from collections import defaultdict
+from scipy.ndimage import distance_transform_edt
 
+from skimage.measure import label as label_1
+from skimage.measure import regionprops
+import cv2
 import numpy as np
+from skimage.morphology import skeletonize
 import torch
 import torch.nn.functional as F
 from scipy.ndimage import binary_dilation
@@ -70,51 +75,250 @@ def load_segment_part(checkpoint_path: str, device: str):
 
 
 # ── GPU processMasks (no CPU-GPU sync, returns centroid) ──────────────────────
+def _largest_cc_edt_cpu(binary_mask_np):
+    """Find largest connected component and compute exact EDT using cv2 (fast C++).
 
-def _edt_skeleton_gpu(mask: torch.Tensor, max_steps: int = 80) -> torch.Tensor:
-    B = mask.shape[0]
-    device = mask.device
-    edt = torch.zeros_like(mask)
-    current = mask.clone()
-    for step in range(1, max_steps + 1):
-        next_c = -F.max_pool2d(-current, kernel_size=3, stride=1, padding=1)
-        newly_removed = (current > 0) & (next_c == 0)
-        edt += newly_removed.float() * step
-        current = next_c
-    edt += (current > 0).float() * (max_steps + 1)
-    mask_bool = mask > 0
-    n_pixels = mask.flatten(1).sum(1).clamp(min=1)
-    edt_in   = edt * mask
-    means = edt_in.flatten(1).sum(1) / n_pixels
-    stds  = ((edt_in.pow(2).flatten(1).sum(1) / n_pixels) - means.pow(2)).clamp(min=0).sqrt()
-    rand   = torch.rand(B, 1, 1, 1, device=device)
-    thresh = (means.view(B,1,1,1) - stds.view(B,1,1,1) + rand * 2 * stds.view(B,1,1,1)).clamp(min=0)
-    core = (edt > thresh) & mask_bool
-    need_fb = (core.float().flatten(1).sum(1) == 0) & (mask.flatten(1).sum(1) > 0)
-    max_edt = (edt * mask).flatten(1).max(1).values.view(B, 1, 1, 1)
-    core = torch.where(need_fb.view(B,1,1,1), (edt >= max_edt - 1e-6) & mask_bool, core)
-    core_edt  = edt * core.float()
-    local_max = F.max_pool2d(core_edt, kernel_size=3, stride=1, padding=1)
-    ridge = (core_edt >= local_max - 1e-6) & core
-    empty = (ridge.float().flatten(1).sum(1) == 0) & (core.float().flatten(1).sum(1) > 0)
-    ridge = torch.where(empty.view(B,1,1,1), core, ridge)
-    return ridge.float()
+    Replaces the old GPU-only EDT-ridge skeleton which had two bugs:
+      1. Processed ALL error pixels instead of only the largest connected component.
+      2. EDT via iterative erosion saturated at max_steps=80, causing flat plateaux
+         that made the 'ridge' degenerate to the entire error region.
+
+    Args:
+        binary_mask_np: uint8 numpy array [H, W], values in {0, 1}
+    Returns:
+        largest_cc  : uint8 [H, W]  — mask of the largest CC
+        edt         : float32 [H, W] — exact Euclidean distance transform
+        centroid    : (cy, cx) int tuple, or None if no foreground
+        area        : int, pixel count of the largest CC
+    """
+    H, W = binary_mask_np.shape
+    empty = (np.zeros((H, W), dtype=np.uint8),
+             np.zeros((H, W), dtype=np.float32), None, 0)
+
+    if binary_mask_np.sum() == 0:
+        return empty
+
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        binary_mask_np, connectivity=4)
+
+    if n_labels <= 1:          # only background label
+        return empty
+
+    largest_idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    largest_cc  = (labels == largest_idx).astype(np.uint8)
+    area        = int(stats[largest_idx, cv2.CC_STAT_AREA])
+    cy = int(round(centroids[largest_idx][1]))   # row
+    cx = int(round(centroids[largest_idx][0]))   # col
+
+    edt = cv2.distanceTransform(largest_cc, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    return largest_cc, edt, (cy, cx), area
 
 
-def processMasks_gpu(pred: torch.Tensor, gt: torch.Tensor):
-    """Returns (signal [B,2,H,W], centers list). Fully on GPU."""
-    device = pred.device
-    B, _, H, W = pred.shape
-    pred_bin = (pred > 0.5).float()
-    fg = ((gt == 1) & (pred_bin == 0)).float()
-    bg = ((gt == 0) & (pred_bin == 1)).float()
-    use_fg = (fg.flatten(1).sum(1) >= bg.flatten(1).sum(1)).float().view(B, 1, 1, 1)
-    selected = fg * use_fg + bg * (1 - use_fg)
-    skel = _edt_skeleton_gpu(selected)
-    out = torch.zeros(B, 2, H, W, device=device)
-    out[:, 0:1] = skel * use_fg
-    out[:, 1:2] = skel * (1 - use_fg)
-    return out
+def processMasks_gpu(pred_mask_all, GT_mask_all, max_edt_steps=80):
+    """
+    Hybrid CPU/GPU replacement for processMasks + generateGuidingSignal.
+
+    Algorithm (matches the original CPU pipeline):
+      1. cv2.connectedComponentsWithStats — find the largest error CC per sample.
+      2. cv2.distanceTransform — exact Euclidean EDT (no saturation).
+      3. GPU: random threshold in [mean-std, mean+std] → core region.
+      4. GPU: local-maxima of EDT within core → ridge ≈ skeletonize output.
+
+    Fixes vs old GPU-only version:
+      - Uses only the LARGEST connected component (not all error pixels).
+      - Exact EDT without max_steps saturation for large regions.
+
+    Args:
+        pred_mask_all:  [B, 1, H, W]
+        GT_mask_all:    [B, 1, H, W]
+        max_edt_steps:  kept for API compatibility, no longer used
+    Returns:
+        [B, 2, H, W]  float32,  ch0 = fg guidance,  ch1 = bg guidance
+    """
+    device = pred_mask_all.device
+    B, _, H, W = pred_mask_all.shape
+
+    pred_np = (pred_mask_all > 0.5).squeeze(1).cpu().numpy().astype(np.uint8)
+    gt_np   = GT_mask_all.squeeze(1).cpu().numpy().astype(np.uint8)
+
+    output = torch.zeros(B, 2, H, W, device=device)
+
+    for b in range(B):
+        fg_mask = ((gt_np[b] == 1) & (pred_np[b] == 0)).astype(np.uint8)
+        bg_mask = ((gt_np[b] == 0) & (pred_np[b] == 1)).astype(np.uint8)
+
+        fg_cc, fg_edt, _, fg_area = _largest_cc_edt_cpu(fg_mask)
+        bg_cc, bg_edt, _, bg_area = _largest_cc_edt_cpu(bg_mask)
+
+        if fg_area >= bg_area:
+            cc, edt_np, channel = fg_cc, fg_edt, 0
+        else:
+            cc, edt_np, channel = bg_cc, bg_edt, 1
+
+        if cc.sum() == 0:
+            continue
+
+        # ── GPU: threshold + ridge (mirrors generateGuidingSignal) ────────────
+        edt_t  = torch.tensor(edt_np, dtype=torch.float32, device=device)
+        mask_t = torch.tensor(cc,     dtype=torch.float32, device=device)
+
+        vals  = edt_t[mask_t > 0]
+        mu    = vals.mean()
+        sigma = vals.std()
+        rand  = torch.rand(1, device=device).item()
+        thresh = float((mu - sigma + rand * 2 * sigma).clamp(min=0))
+
+        core = (edt_t > thresh) & (mask_t > 0)
+        if core.sum() == 0:
+            core = (edt_t > thresh / 2) & (mask_t > 0)
+        if core.sum() == 0:
+            core = mask_t > 0
+
+        # Local-maxima ridge ≈ medial axis (approximates skeletonize)
+        core_edt  = edt_t * core.float()
+        local_max = F.max_pool2d(
+            core_edt.unsqueeze(0).unsqueeze(0), kernel_size=3, stride=1, padding=1
+        ).squeeze(0).squeeze(0)
+        ridge = (core_edt >= local_max - 0.5) & core
+        if ridge.sum() == 0:
+            ridge = core
+
+        output[b, channel] = ridge.float()
+
+    return output
+
+
+def generateGuidingSignal(binaryMask):
+    # binaryMask = binaryMask.squeeze(0)  # Remove the batch dimension if it's (1, H, W)
+    binaryMask = binaryMask.to(torch.uint8)
+    
+    if binaryMask.sum() > 1:
+        # Compute distance transform (move to CPU for NumPy operations)
+        distance_map = distance_transform_edt(binaryMask.cpu().numpy())
+        distance_map = torch.tensor(distance_map, dtype=torch.float32, device=binaryMask.device)
+        
+        # Calculate mean and std (ensure they are on CPU before NumPy operations)
+        tempMean = distance_map.mean().cpu().numpy()
+        tempStd = distance_map.std().cpu().numpy()
+        
+        # Random threshold based on mean and std
+        tempThresh = np.random.uniform(tempMean - tempStd, tempMean + tempStd)
+        tempThresh = torch.tensor(tempThresh, device=binaryMask.device)
+        
+        if tempThresh < 0:
+            tempThresh = np.random.uniform(tempMean / 2, tempMean + tempStd / 2)
+            tempThresh = torch.tensor(tempThresh, device=binaryMask.device)
+        
+        # Apply threshold to get new mask
+        newMask = distance_map > tempThresh
+        if newMask.sum() == 0:
+            newMask = distance_map > (tempThresh / 2)
+        
+        if newMask.sum() == 0:
+            newMask = binaryMask
+
+        # Skeletonize (use skimage and convert back to tensor)
+        skel = skeletonize(newMask.cpu().numpy())
+        skel = torch.tensor(skel, dtype=torch.float32, device=binaryMask.device)
+    else:
+        skel = torch.zeros_like(binaryMask, dtype=torch.float32, device=binaryMask.device)
+
+    return skel
+
+def processMasks(pred_mask_all, GT_mask_all):
+    """
+    批量处理GT_mask和pred_mask，计算每个样本的前景和背景骨架信号。
+    参数:
+        pred_masks: 预测的mask，形状为 [batch_size, 1, H, W]。
+        GT_masks: 真值mask，形状为 [batch_size, 1, H, W]。
+    返回:
+        输出张量，形状为 [batch_size, 2, H, W]。
+        每个样本的第0通道为前景区域骨架信号，第1通道为背景区域骨架信号。
+    """
+    pred_mask_all = (pred_mask_all > 0.5).float()
+
+    batch_size, _, H, W = pred_mask_all.shape
+
+    # 初始化输出张量
+    output = torch.zeros(batch_size, 2, H, W, device=pred_mask_all.device, dtype=torch.float32)
+    # centers = []  # 存储每个样本的最大错误连通域中心坐标
+
+    for i in range(batch_size):
+        # 取出当前样本的预测和真值mask
+        pred_mask = pred_mask_all[i].squeeze(0)  # [H, W]
+        GT_mask = GT_mask_all[i].squeeze(0)      # [H, W]
+
+        # 计算前景区域 (GT_mask为1且pred_mask为0)
+        fg = (GT_mask == 1) & (pred_mask == 0)
+        fg = fg.to(torch.float32)  # [H, W]
+
+        # 计算背景区域 (GT_mask为0且pred_mask为1)
+        bg = (GT_mask == 0) & (pred_mask == 1)
+        bg = bg.to(torch.float32)  # [H, W]
+        
+        # 找出前景的最大连通域
+        if fg.sum() > 0:
+            labeled_fg = label_1(fg.cpu().numpy(), connectivity=1)
+            regions_fg = regionprops(labeled_fg)
+            if regions_fg:
+                largest_region_fg = max(regions_fg, key=lambda r: r.area)
+                fg_largest = (labeled_fg == largest_region_fg.label)
+                fg_largest = torch.from_numpy(fg_largest).to(fg.device, dtype=torch.float32)
+                # fg_center = largest_region_fg.centroid
+                # fg_center = (round(fg_center[0]), round(fg_center[1]))  # 四舍五入
+            else:
+                fg_largest = torch.zeros_like(fg)
+                fg_center = None
+        else:
+            fg_largest = torch.zeros_like(fg)
+            fg_center = None
+
+        # 找出背景的最大连通域
+        if bg.sum() > 0:
+            labeled_bg = label_1(bg.cpu().numpy(), connectivity=1)
+            regions_bg = regionprops(labeled_bg)
+            if regions_bg:
+                largest_region_bg = max(regions_bg, key=lambda r: r.area)
+                bg_largest = (labeled_bg == largest_region_bg.label)
+                bg_largest = torch.from_numpy(bg_largest).to(bg.device, dtype=torch.float32)
+                # bg_center = largest_region_bg.centroid  # 获取背景最大连通域的中心坐标 (y, x)
+                # bg_center = (round(bg_center[0]), round(bg_center[1]))  # 四舍五入
+            else:
+                bg_largest = torch.zeros_like(bg)
+                bg_center = None
+        else:
+            bg_largest = torch.zeros_like(bg)
+            bg_center = None
+        
+        # 比较前景和背景的最大连通域面积
+        fg_area = fg_largest.sum().item()
+        bg_area = bg_largest.sum().item()
+
+        if fg_area >= bg_area:
+            largest_connected = fg_largest
+            # 计算前景区域的骨架信号
+            fg_skeleton = generateGuidingSignal(largest_connected) if largest_connected.sum() > 0 else torch.zeros_like(pred_mask, dtype=torch.float32, device=pred_mask.device)  # 如果fg为全0，创建一个全零张量
+            output[i, 0] = fg_skeleton  # 前景骨架信号
+            # centers.append(fg_center)  # 保存中心坐标
+        else:
+            largest_connected = bg_largest
+            # 计算背景区域的骨架信号
+            bg_skeleton = generateGuidingSignal(largest_connected) if largest_connected.sum() > 0 else torch.zeros_like(pred_mask, dtype=torch.float32, device=pred_mask.device)  # 如果fg为全0，创建一个全零张量
+            output[i, 1] = bg_skeleton  # 背景骨架信号
+            # centers.append(bg_center)  # 保存中心坐标
+            
+        
+        # # 计算前景区域的骨架信号
+        # fg_skeleton = generateGuidingSignal(fg) if fg.sum() > 0 else torch.zeros_like(pred_mask, dtype=torch.float32, device=pred_mask.device)  # 如果fg为全0，创建一个全零张量
+        
+        # # 计算背景区域的骨架信号
+        # bg_skeleton = generateGuidingSignal(bg) if bg.sum() > 0 else torch.zeros_like(pred_mask, dtype=torch.float32, device=pred_mask.device)  # 如果bg为全0，创建一个全零张量
+
+        # # 合并前景和背景骨架信号到输出
+        # output[i, 0] = fg_skeleton  # 前景骨架信号
+        # output[i, 1] = bg_skeleton  # 背景骨架信号
+         
+    return output
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -191,7 +395,7 @@ def run_inference(model, image_t, gt_mask_t, init_signal_t, device, n_iters=20):
         all_signals.append(u_sig.squeeze().cpu().numpy())   # [2,H,W]
 
         # Prepare next iteration
-        sig   = processMasks_gpu(pred, gt)
+        sig   = processMasks(pred, gt)
         u_sig = torch.bitwise_or(sig.to(torch.uint8), u_sig.to(torch.uint8)).float()
         prev  = (pred > 0.5).float()
 
@@ -475,12 +679,12 @@ def main():
             all_signals_per_class[cls] = all_sigs    # list of n_iters numpy [2,H,W]
 
         stem = Path(fname).stem
-        grid_path = out_dir / f'sample_{sample_i:02d}_{stem}_grid.png'
+        grid_path = out_dir / f'CPU_sample_{sample_i:02d}_{stem}_grid.png'
         plot_grid(image_np, gt_per_class, snapshots_per_class,
                   available_classes, snap_indices, grid_path)
 
         if args.animate:
-            anim_path = out_dir / f'sample_{sample_i:02d}_{stem}_anim.gif'
+            anim_path = out_dir / f'CPU_sample_{sample_i:02d}_{stem}_anim.gif'
             make_animation(image_np, all_masks_per_class, all_signals_per_class,
                            available_classes, gt_per_class, anim_path)
 

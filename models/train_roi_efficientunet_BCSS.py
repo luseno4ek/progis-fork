@@ -640,7 +640,7 @@ FOLD        = 1
 PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
 SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 CLS         = 'all'         # 'all' = все классы (как в статье), или 'tumor', 'stroma', etc.
-GPU_ID      = 1             # CUDA device index (0, 1, 2, ...)
+GPU_ID      = 3             # CUDA device index (0, 1, 2, ...)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # train_images_dir = "/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/ROI_data/all_class/image_npy"
@@ -688,7 +688,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
     best_dice = 0.0
     device = f'cuda:{GPU_ID}' if torch.cuda.is_available() else 'cpu'
     model.to(device)
-    tb_dir = f'{PATCHES_DIR}/fold_{FOLD}/runs/fold{FOLD}_{CLS}'
+    tb_dir = f'{PATCHES_DIR}/fold_{FOLD}/runs/fold{FOLD}_{CLS}_PROCESSMASKS_CPU'
     writer = SummaryWriter(log_dir=tb_dir)
     print(f"TensorBoard logs: {tb_dir}")
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
@@ -720,7 +720,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
             input = torch.cat((images, pred_mask, aux_inputs), dim=1)
             pred_mask_1 = model(input)
 
-            signal = processMasks_gpu(pred_mask_1.float(), masks)
+            signal = processMasks(pred_mask_1.float(), masks)
             union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8)).float()
 
             pre_mask_1_threod = (pred_mask_1 >= 0.5).float()
@@ -788,7 +788,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 input = torch.cat((images, pred_mask, aux_inputs), dim=1)
                 pred_mask_1 = model(input)
 
-                signal = processMasks_gpu(pred_mask_1.float(), masks)
+                signal = processMasks(pred_mask_1.float(), masks)
                 union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8)).float()
 
                 pre_mask_1_threod = (pred_mask_1 >= 0.5).float()
@@ -852,7 +852,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
             best_dice = dice_score
             checkpoint_dir = f'{PATCHES_DIR}/fold_{FOLD}/ROI_ckpt'
             os.makedirs(checkpoint_dir, exist_ok=True)
-            torch.save(model.state_dict(), f'{checkpoint_dir}/BCSS_effi-Unet_roi_best_dice{best_dice:.4f}_epoch{epoch+1}.pth')
+            torch.save(model.state_dict(), f'{checkpoint_dir}/ProcessMasks_CPU/BCSS_effi-Unet_roi_best_dice{best_dice:.4f}_epoch{epoch+1}.pth')
             print(f"Best dice: {best_dice:.4f}")
     writer.close()
 
