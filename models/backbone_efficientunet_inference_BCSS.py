@@ -286,7 +286,7 @@ def processMasks_gpu(pred_mask_all, GT_mask_all, max_edt_steps=80):
 
         vals  = edt_t[mask_t > 0]
         mu    = vals.mean()
-        sigma = vals.std()
+        sigma = vals.std(correction=0)   # population std, valid even for N=1
         rand  = torch.rand(1, device=device).item()
         thresh = float((mu - sigma + rand * 2 * sigma).clamp(min=0))
 
