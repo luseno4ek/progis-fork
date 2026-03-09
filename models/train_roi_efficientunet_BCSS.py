@@ -18,7 +18,7 @@ import torch.optim as optim
 from concurrent.futures import ThreadPoolExecutor
 from torch.utils.tensorboard import SummaryWriter
 
-from scipy.ndimage import distance_transform_edt, binary_dilation
+from scipy.ndimage import distance_transform_edt
 import scipy.ndimage as ndi
 from skimage.morphology import skeletonize
 
@@ -99,9 +99,8 @@ def generateGuidingSignal(binaryMask):
         if newMask.sum() == 0:
             newMask = binaryMask
 
-        # Skeletonize then dilate to increase signal density (~0.6% → ~5-8%)
+        # Skeletonize (use skimage and convert back to tensor)
         skel = skeletonize_3d(newMask.cpu().numpy())
-        skel = binary_dilation(skel.astype(bool), iterations=5).astype(np.float32)
         skel = torch.tensor(skel, dtype=torch.float32, device=binaryMask.device)
     else:
         skel = torch.zeros_like(binaryMask, dtype=torch.float32).unsqueeze(-1)
@@ -617,9 +616,6 @@ class CustomDataset(torch.utils.data.Dataset):
         mask = np.load(mask_path)
         signal = np.load(signal_path)
 
-        # Dilate skeleton signals to increase density (~0.6% → ~5-8%)
-        for c in range(signal.shape[0]):
-            signal[c] = binary_dilation(signal[c] > 0, iterations=5).astype(np.float32)
 
         # 转换为 PyTorch 张量
         image = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32)  # (channels, height, width)
@@ -730,8 +726,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
             input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
             pred_mask_2 = model(input)
 
-            l1 = dice_loss(pred_mask_1.float(), masks) + loss_fn(pred_mask_1.float(), masks.float())
-            l2 = dice_loss(pred_mask_2.float(), masks) + loss_fn(pred_mask_2.float(), masks.float())
+            l1 = dice_loss(pred_mask_1.float(), masks)
+            l2 = dice_loss(pred_mask_2.float(), masks)
             loss = l1 + l2
 
             loss.backward()
@@ -810,8 +806,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
                 pred_mask_2 = model(input)
 
-                vl1 = dice_loss(pred_mask_1.float(), masks) + loss_fn(pred_mask_1.float(), masks.float())
-                vl2 = dice_loss(pred_mask_2.float(), masks) + loss_fn(pred_mask_2.float(), masks.float())
+                vl1 = dice_loss(pred_mask_1.float(), masks)
+                vl2 = dice_loss(pred_mask_2.float(), masks)
                 loss = vl1 + vl2
                 val_loss += loss.item() * images.size(0)
                 n = images.size(0)
