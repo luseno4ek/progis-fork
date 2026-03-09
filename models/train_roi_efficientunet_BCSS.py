@@ -635,11 +635,11 @@ def get_filenames_from_folder(folder_path):
     
 
 # ── Configuration ────────────────────────────────────────────────────────────
-FOLD        = 'fold_debug'   # 'fold_debug' for quick tests, 1/2/3 for full runs
+FOLD        = 'debug'   # 'fold_debug' for quick tests, 1/2/3 for full runs
 PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
 SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 CLS         = 'all'         # 'all' = все классы (как в статье), или 'tumor', 'stroma', etc.
-GPU_ID      = 3             # CUDA device index (0, 1, 2, ...)
+GPU_ID      = 1             # CUDA device index (0, 1, 2, ...)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # train_images_dir = "/data_nas2/gjs/ISF_pixel_level_data/Gastric/train/ROI_data/all_class/image_npy"
