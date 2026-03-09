@@ -193,119 +193,76 @@ def processMasks(pred_mask_all, GT_mask_all):
 
 # ── GPU-accelerated processMasks with centroid output (replaces CPU version in inference) ──
 
-def _largest_cc_edt_cpu(binary_mask_np):
-    """Find largest connected component and compute exact EDT using cv2 (fast C++).
-
-    Replaces the old GPU-only EDT-ridge skeleton which had two bugs:
-      1. Processed ALL error pixels instead of only the largest connected component.
-      2. EDT via iterative erosion saturated at max_steps=80, causing flat plateaux
-         that made the 'ridge' degenerate to the entire error region.
-
-    Args:
-        binary_mask_np: uint8 numpy array [H, W], values in {0, 1}
-    Returns:
-        largest_cc  : uint8 [H, W]  — mask of the largest CC
-        edt         : float32 [H, W] — exact Euclidean distance transform
-        centroid    : (cy, cx) int tuple, or None if no foreground
-        area        : int, pixel count of the largest CC
-    """
-    H, W = binary_mask_np.shape
-    empty = (np.zeros((H, W), dtype=np.uint8),
-             np.zeros((H, W), dtype=np.float32), None, 0)
-
-    if binary_mask_np.sum() == 0:
-        return empty
-
-    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        binary_mask_np, connectivity=4)
-
-    if n_labels <= 1:          # only background label
-        return empty
-
-    largest_idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    largest_cc  = (labels == largest_idx).astype(np.uint8)
-    area        = int(stats[largest_idx, cv2.CC_STAT_AREA])
-    cy = int(round(centroids[largest_idx][1]))   # row
-    cx = int(round(centroids[largest_idx][0]))   # col
-
-    edt = cv2.distanceTransform(largest_cc, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-    return largest_cc, edt, (cy, cx), area
+def _edt_skeleton_gpu(mask, max_steps=80):
+    """EDT-ridge skeleton, fully on GPU, zero CPU-GPU syncs inside loop."""
+    B = mask.shape[0]
+    device = mask.device
+    edt = torch.zeros_like(mask)
+    current = mask.clone()
+    for step in range(1, max_steps + 1):
+        next_c = -F.max_pool2d(-current, kernel_size=3, stride=1, padding=1)
+        newly_removed = (current > 0) & (next_c == 0)
+        edt = edt + newly_removed.float() * step
+        current = next_c
+    edt = edt + (current > 0).float() * (max_steps + 1)
+    mask_bool = mask > 0
+    edt_in_mask = edt * mask
+    n_pixels = mask.flatten(1).sum(1).clamp(min=1)
+    edt_sum = edt_in_mask.flatten(1).sum(1)
+    edt_sq  = edt_in_mask.pow(2).flatten(1).sum(1)
+    means = edt_sum / n_pixels
+    stds  = (edt_sq / n_pixels - means.pow(2)).clamp(min=0).sqrt()
+    rand   = torch.rand(B, 1, 1, 1, device=device)
+    thresh = (means.view(B,1,1,1) - stds.view(B,1,1,1)
+              + rand * 2 * stds.view(B,1,1,1)).clamp(min=0)
+    core = (edt > thresh) & mask_bool
+    need_fallback = (core.float().flatten(1).sum(1) == 0) & (mask.flatten(1).sum(1) > 0)
+    max_edt = (edt * mask).flatten(1).max(1).values.view(B, 1, 1, 1)
+    fallback_core = (edt >= max_edt - 1e-6) & mask_bool
+    core = torch.where(need_fallback.view(B, 1, 1, 1), fallback_core, core)
+    core_edt  = edt * core.float()
+    local_max = F.max_pool2d(core_edt, kernel_size=3, stride=1, padding=1)
+    ridge = (core_edt >= local_max - 1e-6) & core
+    empty_ridge = (ridge.float().flatten(1).sum(1) == 0) & (core.float().flatten(1).sum(1) > 0)
+    ridge = torch.where(empty_ridge.view(B, 1, 1, 1), core, ridge)
+    return ridge.float()
 
 
 def processMasks_gpu(pred_mask_all, GT_mask_all, max_edt_steps=80):
     """
-    Hybrid CPU/GPU replacement for processMasks + generateGuidingSignal.
-
-    Algorithm (matches the original CPU pipeline):
-      1. cv2.connectedComponentsWithStats — find the largest error CC per sample.
-      2. cv2.distanceTransform — exact Euclidean EDT (no saturation).
-      3. GPU: random threshold in [mean-std, mean+std] → core region.
-      4. GPU: local-maxima of EDT within core → ridge ≈ skeletonize output.
-
-    Fixes vs old GPU-only version:
-      - Uses only the LARGEST connected component (not all error pixels).
-      - Exact EDT without max_steps saturation for large regions.
-
-    Args:
-        pred_mask_all:  [B, 1, H, W]
-        GT_mask_all:    [B, 1, H, W]
-        max_edt_steps:  kept for API compatibility, no longer used
-    Returns:
-        output  : [B, 2, H, W] float32  (ch0=fg guidance, ch1=bg guidance)
-        centers : list of (cy, cx) int tuples or None, length B
+    GPU drop-in for processMasks. Returns (signal [B,2,H,W], centers list).
+    centers[b] = (cy, cx) int tuple, or None if no error region for sample b.
+    Replaces CPU processMasks in the inference loop — eliminates scipy/skimage bottleneck.
     """
     device = pred_mask_all.device
     B, _, H, W = pred_mask_all.shape
 
-    pred_np = (pred_mask_all > 0.5).squeeze(1).cpu().numpy().astype(np.uint8)
-    gt_np   = GT_mask_all.squeeze(1).cpu().numpy().astype(np.uint8)
+    pred_bin = (pred_mask_all > 0.5).float()
+    fg = ((GT_mask_all == 1) & (pred_bin == 0)).float()
+    bg = ((GT_mask_all == 0) & (pred_bin == 1)).float()
 
-    output  = torch.zeros(B, 2, H, W, device=device)
-    centers = []
+    fg_area = fg.flatten(1).sum(1)
+    bg_area = bg.flatten(1).sum(1)
+    use_fg  = (fg_area >= bg_area).float().view(B, 1, 1, 1)
 
-    for b in range(B):
-        fg_mask = ((gt_np[b] == 1) & (pred_np[b] == 0)).astype(np.uint8)
-        bg_mask = ((gt_np[b] == 0) & (pred_np[b] == 1)).astype(np.uint8)
+    selected = fg * use_fg + bg * (1 - use_fg)          # [B, 1, H, W]
+    skel     = _edt_skeleton_gpu(selected, max_edt_steps)
 
-        fg_cc, fg_edt, fg_ctr, fg_area = _largest_cc_edt_cpu(fg_mask)
-        bg_cc, bg_edt, bg_ctr, bg_area = _largest_cc_edt_cpu(bg_mask)
+    output = torch.zeros(B, 2, H, W, device=device)
+    output[:, 0:1] = skel * use_fg
+    output[:, 1:2] = skel * (1 - use_fg)
 
-        if fg_area >= bg_area:
-            cc, edt_np, center, channel = fg_cc, fg_edt, fg_ctr, 0
-        else:
-            cc, edt_np, center, channel = bg_cc, bg_edt, bg_ctr, 1
-
-        centers.append(center)
-
-        if cc.sum() == 0:
-            continue
-
-        # ── GPU: threshold + ridge (mirrors generateGuidingSignal) ────────────
-        edt_t  = torch.tensor(edt_np, dtype=torch.float32, device=device)
-        mask_t = torch.tensor(cc,     dtype=torch.float32, device=device)
-
-        vals  = edt_t[mask_t > 0]
-        mu    = vals.mean()
-        sigma = vals.std(correction=0)   # population std, valid even for N=1
-        rand  = torch.rand(1, device=device).item()
-        thresh = float((mu - sigma + rand * 2 * sigma).clamp(min=0))
-
-        core = (edt_t > thresh) & (mask_t > 0)
-        if core.sum() == 0:
-            core = (edt_t > thresh / 2) & (mask_t > 0)
-        if core.sum() == 0:
-            core = mask_t > 0
-
-        # Local-maxima ridge ≈ medial axis (approximates skeletonize)
-        core_edt  = edt_t * core.float()
-        local_max = F.max_pool2d(
-            core_edt.unsqueeze(0).unsqueeze(0), kernel_size=3, stride=1, padding=1
-        ).squeeze(0).squeeze(0)
-        ridge = (core_edt >= local_max - 0.5) & core
-        if ridge.sum() == 0:
-            ridge = core
-
-        output[b, channel] = ridge.float()
+    # Compute centroids of selected error regions (vectorised, 3 tiny syncs total)
+    ys = torch.arange(H, device=device).float().view(1, 1, H, 1)
+    xs = torch.arange(W, device=device).float().view(1, 1, 1, W)
+    n  = selected.flatten(1).sum(1).clamp(min=1)
+    cy = (selected * ys).flatten(1).sum(1) / n
+    cx = (selected * xs).flatten(1).sum(1) / n
+    has_region = selected.flatten(1).sum(1) > 0
+    cy_list  = cy.round().long().tolist()
+    cx_list  = cx.round().long().tolist()
+    has_list = has_region.tolist()
+    centers = [(cy_list[b], cx_list[b]) if has_list[b] else None for b in range(B)]
 
     return output, centers
 
