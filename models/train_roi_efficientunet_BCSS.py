@@ -636,7 +636,7 @@ def get_filenames_from_folder(folder_path):
     
 
 # ── Configuration ────────────────────────────────────────────────────────────
-FOLD        = 1
+FOLD        = 'fold_debug'   # 'fold_debug' for quick tests, 1/2/3 for full runs
 PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
 SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 CLS         = 'all'         # 'all' = все классы (как в статье), или 'tumor', 'stroma', etc.
@@ -700,6 +700,10 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         train_dice_score = 0.0
         train_accuracy = 0.0  # 用于累积准确率
         train_true_positive_ratio, train_false_positive_ratio = 0.0 , 0.0
+        # ── diagnostic accumulators ──────────────────────────────────────────
+        dbg_train_loss1 = 0.0; dbg_train_loss2 = 0.0
+        dbg_train_p1fg  = 0.0; dbg_train_p2fg  = 0.0
+        dbg_train_signz = 0.0
 
 
         train_batch_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", leave=False, unit="batch")
@@ -727,12 +731,20 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
             input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
             pred_mask_2 = model(input)
 
-            loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
+            l1 = dice_loss(pred_mask_1.float(), masks)
+            l2 = dice_loss(pred_mask_2.float(), masks)
+            loss = l1 + l2
 
             loss.backward()
             optimizer.step()
 
             train_loss += loss.item() * images.size(0)
+            n = images.size(0)
+            dbg_train_loss1 += l1.item() * n
+            dbg_train_loss2 += l2.item() * n
+            dbg_train_p1fg  += (pred_mask_1 >= 0.5).float().mean().item() * n
+            dbg_train_p2fg  += (pred_mask_2 >= 0.5).float().mean().item() * n
+            dbg_train_signz += union_signal.bool().float().mean().item() * n
 
             outputs = (pred_mask_2 >= 0.5).int()
 
@@ -769,6 +781,10 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         dice_score = 0.0
         val_accuracy = 0.0  # 用于累积准确率
         val_true_positive_ratio, val_false_positive_ratio = 0.0 , 0.0
+        # ── diagnostic accumulators ──────────────────────────────────────────
+        dbg_val_loss1 = 0.0; dbg_val_loss2 = 0.0
+        dbg_val_p1fg  = 0.0; dbg_val_p2fg  = 0.0
+        dbg_val_signz = 0.0; dbg_val_nan   = 0
         
 
         with torch.no_grad():
@@ -795,12 +811,22 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 input = torch.cat((images, pre_mask_1_threod, union_signal), dim=1)
                 pred_mask_2 = model(input)
 
-                loss = dice_loss(pred_mask_1.float(), masks) + dice_loss(pred_mask_2.float(), masks)
+                vl1 = dice_loss(pred_mask_1.float(), masks)
+                vl2 = dice_loss(pred_mask_2.float(), masks)
+                loss = vl1 + vl2
                 val_loss += loss.item() * images.size(0)
-                
+                n = images.size(0)
+                dbg_val_loss1 += vl1.item() * n
+                dbg_val_loss2 += vl2.item() * n
+                dbg_val_p1fg  += (pred_mask_1 >= 0.5).float().mean().item() * n
+                dbg_val_p2fg  += (pred_mask_2 >= 0.5).float().mean().item() * n
+                dbg_val_signz += union_signal.bool().float().mean().item() * n
+                if torch.isnan(pred_mask_2).any() or torch.isnan(pred_mask_1).any():
+                    dbg_val_nan += 1
+
                 outputs = pred_mask_2
                 outputs = (outputs >= 0.5).int()
-                
+
                 dice_score += dice_coeff(outputs, masks).item() * images.size(0)
 
                 # 计算准确率
@@ -837,6 +863,12 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         epoch_pbar.set_postfix(train_loss=f"{train_loss:.4f}", train_dice=f"{train_dice_score:.4f}",
                                val_loss=f"{val_loss:.4f}", val_dice=f"{dice_score:.4f}", val_iou=f"{mean_iou:.4f}")
         print(f'Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f}  Train Dice: {train_dice_score:.4f}  Train Acc: {train_accuracy:.4f} | Val Loss: {val_loss:.4f}  Val Dice: {dice_score:.4f}  Val mIoU: {mean_iou:.4f}  Val Acc: {val_accuracy:.4f}')
+        N_tr = len(train_loader.dataset); N_val = len(val_loader.dataset)
+        print(f'  [DBG train] loss1={dbg_train_loss1/N_tr:.4f} loss2={dbg_train_loss2/N_tr:.4f} '
+              f'p1fg={dbg_train_p1fg/N_tr:.3f} p2fg={dbg_train_p2fg/N_tr:.3f} signal_nz={dbg_train_signz/N_tr:.4f}')
+        print(f'  [DBG val]   loss1={dbg_val_loss1/N_val:.4f} loss2={dbg_val_loss2/N_val:.4f} '
+              f'p1fg={dbg_val_p1fg/N_val:.3f} p2fg={dbg_val_p2fg/N_val:.3f} signal_nz={dbg_val_signz/N_val:.4f} '
+              f'nan_batches={dbg_val_nan}')
 
         writer.add_scalars('Loss',     {'train': train_loss, 'val': val_loss},           epoch + 1)
         writer.add_scalars('Dice',     {'train': train_dice_score, 'val': dice_score},   epoch + 1)
