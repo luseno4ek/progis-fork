@@ -665,7 +665,7 @@ val_loader   = DataLoader(val_dataset,   batch_size=16, shuffle=False, num_worke
 
 # 创建模型实例 - P-RoISeg uses backbone=False for 6-channel input (RGB+prev_mask+fg_signal+bg_signal)
 device = f'cuda:{GPU_ID}' if torch.cuda.is_available() else 'cpu'
-model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=True, backbone=False).to(device)
+model = get_efficientunet_b0(out_channels=1, concat_input=True, pretrained=False, backbone=False).to(device)
 
 # model = MultiScaleResUnet(in_channels=5, num_classes=1)
 

@@ -200,10 +200,10 @@ def _get_model_by_name(model_name, classes=1000, pretrained=False, backbone=True
             model_stem = model.state_dict()['_conv_stem.weight']
             pretrained_stem = pretrained_state_dict['_conv_stem.weight']
             if model_stem.shape != pretrained_stem.shape:
-                new_stem = torch.zeros_like(model_stem)
+                new_stem = model_stem.clone()  # keep Kaiming init for all channels
                 n_ch = pretrained_stem.shape[1]  # 3
                 new_stem[:, :n_ch, :, :] = pretrained_stem  # RGB channels from ImageNet
-                # extra channels (prev_mask, fg_signal, bg_signal) stay zero
+                # extra channels (prev_mask, fg_signal, bg_signal) keep Kaiming random init
                 pretrained_state_dict['_conv_stem.weight'] = new_stem
 
             model.load_state_dict(pretrained_state_dict)
