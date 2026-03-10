@@ -683,7 +683,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
     best_dice = 0.0
     device = f'cuda:{GPU_ID}' if torch.cuda.is_available() else 'cpu'
     model.to(device)
-    tb_dir = f'{PATCHES_DIR}/fold_{FOLD}/runs/fold{FOLD}_{CLS}_PROCESSMASKS_CPU'
+    tb_dir = f'{PATCHES_DIR}/fold_{FOLD}/runs/fold{FOLD}_{CLS}_PROCESSMASKS_GPU_crop'
     writer = SummaryWriter(log_dir=tb_dir)
     print(f"TensorBoard logs: {tb_dir}")
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
@@ -719,7 +719,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
             input = torch.cat((images, pred_mask, aux_inputs), dim=1)
             pred_mask_1 = model(input)
 
-            signal = processMasks(pred_mask_1.float(), masks)
+            signal = processMasks_gpu(pred_mask_1.float(), masks)
             union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8)).float()
 
             pre_mask_1_threod = (pred_mask_1 >= 0.5).float()
@@ -799,7 +799,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
                 input = torch.cat((images, pred_mask, aux_inputs), dim=1)
                 pred_mask_1 = model(input)
 
-                signal = processMasks(pred_mask_1.float(), masks)
+                signal = processMasks_gpu(pred_mask_1.float(), masks)
                 union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8)).float()
 
                 pre_mask_1_threod = (pred_mask_1 >= 0.5).float()
@@ -877,9 +877,9 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer,  epochs=50)
         # # Save the best model
         if dice_score > best_dice:
             best_dice = dice_score
-            checkpoint_dir = f'{PATCHES_DIR}/fold_{FOLD}/ROI_ckpt'
+            checkpoint_dir = f'{PATCHES_DIR}/fold_{FOLD}/ROI_ckpt/ProcessMasks_GPU_crop'
             os.makedirs(checkpoint_dir, exist_ok=True)
-            torch.save(model.state_dict(), f'{checkpoint_dir}/ProcessMasks_CPU/BCSS_effi-Unet_roi_best_dice{best_dice:.4f}_epoch{epoch+1}.pth')
+            torch.save(model.state_dict(), f'{checkpoint_dir}/BCSS_effi-Unet_roi_best_dice{best_dice:.4f}_epoch{epoch+1}.pth')
             print(f"Best dice: {best_dice:.4f}")
     writer.close()
 

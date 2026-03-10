@@ -864,6 +864,8 @@ def ROI_crop_signal_line(input, aux_input, superpixel, mask):
             start_x = torch.randint(0, max(W - 256, 1), (1,)).item()
             end_y = start_y + 256
             end_x = start_x + 256
+            center_y = start_y + 128
+            center_x = start_x + 128
             
         # 裁剪 input 和 aux_input
         roi_input = input[b, :, start_y:end_y, start_x:end_x]
@@ -1162,7 +1164,7 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1", 
                 count = 0
             
                     
-                signal, centers = processMasks(out_put, masks)
+                signal, centers = processMasks_gpu(out_put, masks)
                 union_signal = torch.bitwise_or(signal.to(torch.uint8), aux_inputs.to(torch.uint8))
                 
                 # union_signal = all_aux_inputs
@@ -1172,7 +1174,7 @@ def train_model(model, val_loader, epochs=50, threod=0.4, fold=1 , cls_num="1", 
                     if count > 0:
                         out_put = pre_masks
                         
-                        signal, centers = processMasks(out_put, masks)
+                        signal, centers = processMasks_gpu(out_put, masks)
                         union_signal = torch.bitwise_or(signal.to(torch.uint8), union_signal.to(torch.uint8))
                     
                     # 假设 outputs 和 masks 的形状都是 (batch_size, 1, H, W)
@@ -1352,7 +1354,7 @@ CLS         = 'all'
 PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
 SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 # Checkpoint: trained ROI-Seg model — update path to your best checkpoint
-ROI_CKPT    = PATCHES_DIR + '/fold_1/ROI_ckpt/ProcessMasks_GPU/BCSS_effi-Unet_roi_best_dice0.9704_epoch17.pth'
+ROI_CKPT    = PATCHES_DIR + '/fold_1/ROI_ckpt/ProcessMasks_GPU_crop/BCSS_effi-Unet_roi_best_dice0.9460_epoch20.pth'
 
 # ── Backbone selection ────────────────────────────────────────────────────────
 # USE_SIMCLR = True  → SimCLR ResNet50 pretrained on TCGA-BRCA histology
@@ -1367,7 +1369,7 @@ PROJ_CKPT   = PATCHES_DIR + '/fold_1/simclr_proj/proj_best.pth'
 
 _backbone_tag = 'simclr' if USE_SIMCLR else 'efficientunet'
 RESULTS_DIR = (PATCHES_DIR
-               + '/fold_1/ROI_ckpt/ProcessMasks_GPU/BCSS_effi-Unet_roi_best_dice0.9704_epoch17'
+               + '/fold_1/ROI_ckpt/ProcessMasks_GPU_crop/BCSS_effi-Unet_roi_best_dice0.9460_epoch20'
                + f'/results_{_backbone_tag}')
 
 from dataset import RoISegDataset
@@ -1391,7 +1393,7 @@ class InferenceDataset(torch.utils.data.Dataset):
         return image, signal, mask, suppixel, fname
 
 
-device = 'cuda:2' if torch.cuda.is_available() else 'cpu'
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 
 # Model: backbone (frozen) + our trained ROI-Seg (segment_part)
 if USE_SIMCLR:
