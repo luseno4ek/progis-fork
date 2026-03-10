@@ -631,7 +631,7 @@ def get_filenames_from_folder(folder_path):
     
 
 # ── Configuration ────────────────────────────────────────────────────────────
-FOLD        = 'debug'   # 'fold_debug' for quick tests, 1/2/3 for full runs
+FOLD        = 1   # 'fold_debug' for quick tests, 1/2/3 for full runs
 PATCHES_DIR = "/srv/data1/data_repository/BCSS/patches"
 SPLITS_JSON = "/srv/data1/data_repository/BCSS/patches/fold_splits.json"
 CLS         = 'all'         # 'all' = все классы (как в статье), или 'tumor', 'stroma', etc.
