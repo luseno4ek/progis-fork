@@ -94,6 +94,26 @@ class RoISegDataset(Dataset):
         mask   = np.load(self.patches_dir / cls / 'mask_npy' / fname)      # [H,W]
         signal = np.load(self.patches_dir / cls / 'signal_all_line_npy' / fname)  # [2,H,W]
 
+        # Crop 256×256 centered on fg signal (mirrors inference ROI_crop_signal_line logic)
+        H, W = image.shape[:2]
+        crop = 256
+        fg_ys, fg_xs = np.where(signal[0] > 0)
+        if fg_ys.size > 0:
+            center_y = int(fg_ys.mean().round())
+            center_x = int(fg_xs.mean().round())
+            start_y = max(center_y - crop // 2, 0)
+            start_x = max(center_x - crop // 2, 0)
+            start_y = min(start_y, H - crop)
+            start_x = min(start_x, W - crop)
+        else:
+            start_y = np.random.randint(0, H - crop + 1)
+            start_x = np.random.randint(0, W - crop + 1)
+        end_y, end_x = start_y + crop, start_x + crop
+
+        image  = image[start_y:end_y, start_x:end_x, :]
+        mask   = mask[start_y:end_y, start_x:end_x]
+        signal = signal[:, start_y:end_y, start_x:end_x]
+
         image  = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32)
         mask   = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
         signal = torch.tensor(signal, dtype=torch.float32)
