@@ -391,7 +391,7 @@ def run_inference(model, image_t, gt_mask_t, init_signal_t, device, n_iters=20):
         all_signals.append(u_sig.squeeze().cpu().numpy())   # [2,H,W]
 
         # Prepare next iteration
-        sig   = processMasks_gpu(pred, gt)
+        sig   = processMasks(pred, gt)
         u_sig = torch.bitwise_or(sig.to(torch.uint8), u_sig.to(torch.uint8)).float()
         prev  = (pred > 0.5).float()
 
@@ -675,12 +675,12 @@ def main():
             all_signals_per_class[cls] = all_sigs    # list of n_iters numpy [2,H,W]
 
         stem = Path(fname).stem
-        grid_path = out_dir / f'crop_sample_{sample_i:02d}_{stem}_grid.png'
+        grid_path = out_dir / f'crop_cpu_sample_{sample_i:02d}_{stem}_grid.png'
         plot_grid(image_np, gt_per_class, snapshots_per_class,
                   available_classes, snap_indices, grid_path)
 
         if args.animate:
-            anim_path = out_dir / f'crop_sample_{sample_i:02d}_{stem}_anim.gif'
+            anim_path = out_dir / f'crop_cpu_sample_{sample_i:02d}_{stem}_anim.gif'
             make_animation(image_np, all_masks_per_class, all_signals_per_class,
                            available_classes, gt_per_class, anim_path)
 
