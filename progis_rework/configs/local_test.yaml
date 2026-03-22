@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ProGIS — Local CPU test configuration (macOS, no GPU)
+#
+# Data: 87 train + 158 val patches (tumor class, fold 1)
+# Purpose: smoke-test training loop and evaluation before server run
+#
+# Prerequisites:
+#   python -m progis_rework.scripts.setup_local_flat \
+#       --fold_dir data/patches/fold_1 \
+#       --output   data/patches/local_flat \
+#       --cls      tumor
+#
+# Stage 2 training (2 epochs, quick):
+#   python -m progis_rework.training.train_stage2 \
+#       --patches_dir  data/patches/local_flat \
+#       --splits_json  data/patches/local_flat/fold_splits.json \
+#       --fold 1 --cls tumor \
+#       --epochs 2 --batch_size 2 --num_workers 0 \
+#       --device cpu \
+#       --checkpoint_dir runs/local_test
+#
+# Evaluation (NoI metric):
+#   python -m progis_rework.inference.evaluate \
+#       --patches_dir  data/patches/local_flat \
+#       --splits_json  data/patches/local_flat/fold_splits.json \
+#       --fold 1 --cls tumor \
+#       --roi_ckpt     runs/local_test/stage2_best.pth \
+#       --backbone     efficientunet \
+#       --n_iter 5 --batch_size 2 --num_workers 0 \
+#       --device cpu
+# ─────────────────────────────────────────────────────────────────────────────
+
+data:
+  patches_dir:  data/patches/local_flat
+  splits_json:  data/patches/local_flat/fold_splits.json
+  fold:         1
+  cls:          tumor        # single class; change to "all" once multi-class data is set up
+  crop_size:    256
+  patch_size:   512
+  stride:       256
+  min_fg_ratio: 0.05
+
+model:
+  backbone:      efficientunet
+  roi_ckpt:      ""           # fill after training
+  proj_ckpt:     ""
+  threshold:     0.5
+  seg_threshold: 0.95
+
+stage2:
+  epochs:         2           # 2 epochs to verify the loop; use 50 on server
+  batch_size:     2           # small batch for CPU RAM
+  num_workers:    0           # must be 0 on macOS with DataLoader + numpy
+  lr:             4.0e-4
+  weight_decay:   5.0e-5
+  device:         cpu
+  checkpoint_dir: runs/local_test
+  tensorboard:    false       # skip TensorBoard for quick local runs
+
+eval:
+  n_iter:      5              # 5 correction rounds (not 20) for speed
+  threshold:   0.5
+  batch_size:  2
+  num_workers: 0
+  device:      cpu
+  results_dir: ""
+
+api:
+  host:      "127.0.0.1"
+  port:      8000
+  device:    cpu
+  crop_size: 256

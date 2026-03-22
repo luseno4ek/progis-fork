@@ -1,0 +1,115 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ProGIS — BCSS configuration
+#
+# Usage (training):
+#   python -m progis_rework.training.train_stage2 \
+#       --patches_dir  $(data.patches_dir) \
+#       --splits_json  $(data.splits_json) \
+#       --fold         $(data.fold) \
+#       --cls          $(data.cls)  \
+#       ...
+#
+# Or load programmatically:
+#   import yaml
+#   with open("progis_rework/configs/bcss.yaml") as f:
+#       cfg = yaml.safe_load(f)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+
+data:
+  # Raw WSI images and masks (PNG, produced by convert_bcss_to_npy.py)
+  images_dir:   data/BCSS/images
+  masks_dir:    data/BCSS/masks
+
+  # Pre-processed patches root (produced by BCSSDataProcessor)
+  processed_dir: data/processed
+  patches_dir:   data/patches
+
+  # Cross-validation
+  splits_json:  data/patches/fold_splits.json
+  fold:         1            # active fold (1-based)
+  n_folds:      5
+
+  # Class filter: "all" trains on every class jointly;
+  # or pick one: tumor | stroma | inflammatory_infiltration |
+  #              necrosis_or_debris | gland | blood_vessel
+  cls: all
+
+  # Patch extraction
+  patch_size:   512
+  stride:       256
+  min_fg_ratio: 0.05   # patches with less foreground are discarded
+  crop_size:    256    # ROI window used during training / inference
+
+  # BCSS label map (original pixel values → class name)
+  label_map:
+    tumor:                     [1]
+    stroma:                    [2]
+    inflammatory_infiltration: [3]
+    necrosis_or_debris:        [4]
+    gland:                     [5]
+    blood_vessel:              [6]
+
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+
+model:
+  # backbone: "efficientunet" | "simclr"
+  backbone: efficientunet
+
+  # Checkpoint paths (relative to repo root or absolute)
+  roi_ckpt:  ""    # Stage 2 segment_part weights (required for inference)
+  proj_ckpt: ""    # SimCLR projection head (only used when backbone=simclr)
+
+  # Prototype initialisation threshold (cosine similarity → binary mask)
+  threshold: 0.5
+
+  # Prototype selection: pixels with similarity >= seg_threshold are used
+  # to average features into the prototype vector
+  seg_threshold: 0.95
+
+
+# ── Stage 1 training (Feature Extractor / Backbone) ──────────────────────────
+
+stage1:
+  epochs:       50
+  batch_size:   16
+  lr:           1.0e-3
+  weight_decay: 1.0e-4
+  num_workers:  4
+  device:       cpu          # "cpu" | "cuda" | "cuda:0"
+  checkpoint_dir: runs/stage1
+
+
+# ── Stage 2 training (P-RoISeg) ───────────────────────────────────────────────
+
+stage2:
+  epochs:       50
+  batch_size:   16
+  lr:           4.0e-4
+  weight_decay: 5.0e-5
+  num_workers:  4
+  device:       cpu          # "cpu" | "cuda" | "cuda:0"
+  checkpoint_dir: runs/stage2
+  tensorboard:  true
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+eval:
+  n_iter:      20     # max correction iterations (NoI metric)
+  threshold:   0.5    # binarisation threshold for prototype mask
+  batch_size:  16
+  num_workers: 4
+  device:      cpu
+  results_dir: ""     # if set, per-sample .pkl files are saved here
+
+
+# ── API server ────────────────────────────────────────────────────────────────
+
+api:
+  host:      "0.0.0.0"
+  port:      8000
+  device:    cpu
+  crop_size: 256

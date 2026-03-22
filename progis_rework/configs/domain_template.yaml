@@ -1,0 +1,133 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ProGIS — Domain template
+#
+# Copy this file and fill in the fields for your dataset.
+# Rename to, e.g., geology.yaml, microscopy.yaml, etc.
+#
+# Steps:
+#   1. Collect raw images and binary masks.
+#   2. Fill in [data] section paths and label_map.
+#   3. Run preprocessing:
+#        python -m progis_rework.data.processor all \
+#            --images_dir  <data.images_dir> \
+#            --masks_dir   <data.masks_dir>  \
+#            --processed_dir <data.processed_dir> \
+#            --patches_dir   <data.patches_dir>
+#   4. Train Stage 2 (backbone=None; optionally load a Stage 1 backbone):
+#        python -m progis_rework.training.train_stage2 \
+#            --patches_dir <data.patches_dir> \
+#            --splits_json <data.splits_json> \
+#            --cls all --epochs <stage2.epochs> \
+#            --device <stage2.device>
+#   5. Evaluate:
+#        python -m progis_rework.inference.evaluate \
+#            --patches_dir <data.patches_dir> \
+#            --splits_json <data.splits_json> \
+#            --roi_ckpt    <model.roi_ckpt>
+#   6. Start interactive API:
+#        python -m progis_rework.interactive.api \
+#            --roi_ckpt <model.roi_ckpt> \
+#            --host <api.host> --port <api.port>
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+
+data:
+  # Path to raw image files (PNG / TIFF / JPEG)
+  images_dir:    data/DOMAIN/images     # <<< CHANGE
+
+  # Path to corresponding binary mask files (same filename stem, PNG)
+  masks_dir:     data/DOMAIN/masks      # <<< CHANGE
+
+  # Where processed NPY files will be written
+  processed_dir: data/DOMAIN/processed  # <<< CHANGE
+
+  # Where sliding-window patches will be written
+  patches_dir:   data/DOMAIN/patches    # <<< CHANGE
+
+  # Cross-validation splits file (created automatically during preprocessing)
+  splits_json:   data/DOMAIN/patches/fold_splits.json   # <<< CHANGE
+
+  fold:    1        # active fold for training / evaluation
+  n_folds: 5        # total number of folds
+
+  # Class filter used in training / evaluation
+  # "all" → treat every non-zero pixel as foreground (binary segmentation)
+  # or list a key from label_map below
+  cls: all
+
+  # Patch extraction parameters
+  patch_size:   512    # spatial size of each patch (pixels)
+  stride:       256    # sliding-window stride (set < patch_size for overlap)
+  min_fg_ratio: 0.05   # discard patches with less than this fraction of fg pixels
+  crop_size:    256    # ROI window fed to the model
+
+  # Label map: maps class names to lists of pixel values in the raw masks.
+  # For binary tasks (single object class) use:
+  #   foreground: [255]     or whatever value your masks use
+  # For multi-class, list each class separately:
+  #   class_a: [1]
+  #   class_b: [2, 3]       # merge labels 2 and 3 into one class
+  label_map:
+    foreground: [255]       # <<< CHANGE to match your masks
+
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+
+model:
+  # "efficientunet" — lighter, trains from scratch or with ImageNet init
+  # "simclr"        — requires a pre-trained SimCLR encoder + proj_ckpt
+  backbone: efficientunet  # <<< CHANGE if using SimCLR
+
+  # Fill these after training (used for inference / evaluation / API)
+  roi_ckpt:  ""   # path to stage2_best.pth
+  proj_ckpt: ""   # SimCLR projection head checkpoint (leave empty for efficientunet)
+
+  # Thresholds
+  threshold:     0.5    # cosine similarity → binary prototype mask
+  seg_threshold: 0.95   # minimum similarity to include a pixel in the prototype average
+
+
+# ── Stage 1 training (optional — only if you want domain-adapted backbone) ───
+
+stage1:
+  epochs:       50
+  batch_size:   16
+  lr:           1.0e-3
+  weight_decay: 1.0e-4
+  num_workers:  4
+  device:       cpu        # "cpu" | "cuda"
+  checkpoint_dir: runs/DOMAIN/stage1   # <<< CHANGE
+
+
+# ── Stage 2 training (P-RoISeg — main training step) ────────────────────────
+
+stage2:
+  epochs:       50
+  batch_size:   16
+  lr:           4.0e-4
+  weight_decay: 5.0e-5
+  num_workers:  4
+  device:       cpu        # "cpu" | "cuda"
+  checkpoint_dir: runs/DOMAIN/stage2   # <<< CHANGE
+  tensorboard:  true
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+eval:
+  n_iter:      20      # max correction iterations (NoI metric)
+  threshold:   0.5
+  batch_size:  16
+  num_workers: 4
+  device:      cpu
+  results_dir: ""      # leave empty to skip per-sample output files
+
+
+# ── API server ────────────────────────────────────────────────────────────────
+
+api:
+  host:      "0.0.0.0"
+  port:      8000
+  device:    cpu
+  crop_size: 256
