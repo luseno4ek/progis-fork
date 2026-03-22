@@ -52,6 +52,7 @@ env/
 
 # Directories with data
 data/
+!progis_rework/data/
 dataset/
 datasets/
 BCSS/
