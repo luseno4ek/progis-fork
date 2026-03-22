@@ -9,23 +9,17 @@
 #     fold_splits.json
 #
 # Stage 2 training (full, 50 epochs):
+#   python -m progis_rework.training.train_stage2 --config progis_rework/configs/server_bcss.yaml
+#
+# With per-run overrides (e.g. different fold or device):
 #   python -m progis_rework.training.train_stage2 \
-#       --patches_dir  /srv/data1/data_repository/BCSS/patches \
-#       --splits_json  /srv/data1/data_repository/BCSS/patches/fold_splits.json \
-#       --fold 1 --cls all \
-#       --epochs 50 --batch_size 16 --num_workers 4 \
-#       --device cuda \
-#       --checkpoint_dir runs/stage2/fold1
+#       --config progis_rework/configs/server_bcss.yaml \
+#       --fold 2 --device cuda:1
 #
 # Evaluation (NoI metric, n_iter=20):
 #   python -m progis_rework.inference.evaluate \
-#       --patches_dir  /srv/data1/data_repository/BCSS/patches \
-#       --splits_json  /srv/data1/data_repository/BCSS/patches/fold_splits.json \
-#       --fold 1 --cls all \
-#       --roi_ckpt     runs/stage2/fold1/stage2_best.pth \
-#       --backbone     efficientunet \
-#       --n_iter 20 --batch_size 16 --num_workers 4 \
-#       --device cuda
+#       --config progis_rework/configs/server_bcss.yaml \
+#       --roi_ckpt runs/stage2/fold1/2026-03-22_14-05/stage2_best.pth
 # ─────────────────────────────────────────────────────────────────────────────
 
 data:

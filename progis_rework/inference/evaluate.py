@@ -252,45 +252,86 @@ def _build_parser() -> argparse.ArgumentParser:
         description="ProGIS evaluation (NoI metric).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Data
-    p.add_argument("--patches_dir",  required=True)
-    p.add_argument("--splits_json",  required=True)
-    p.add_argument("--fold",         type=int,   default=1)
-    p.add_argument("--cls",          default="all")
-    p.add_argument("--crop_size",    type=int,   default=256)
-    # Model
-    p.add_argument("--backbone",     default="efficientunet",
-                   choices=["efficientunet", "simclr"])
-    p.add_argument("--roi_ckpt",     required=True,
-                   help="Path to segment_part .pth checkpoint.")
-    p.add_argument("--proj_ckpt",    default="",
-                   help="SimCLR projection head checkpoint (simclr backbone only).")
-    # Evaluation
-    p.add_argument("--n_iter",       type=int,   default=20)
-    p.add_argument("--threshold",    type=float, default=0.5)
-    # Hardware
-    p.add_argument("--device",       default="cpu")
-    p.add_argument("--batch_size",   type=int,   default=16)
-    p.add_argument("--num_workers",  type=int,   default=4)
+    p.add_argument("--config", default=None,
+                   help="Path to a YAML config file. Individual flags override YAML values.")
+    # Overrides — all optional when --config is provided
+    p.add_argument("--patches_dir")
+    p.add_argument("--splits_json")
+    p.add_argument("--fold",       type=int)
+    p.add_argument("--cls")
+    p.add_argument("--crop_size",  type=int)
+    p.add_argument("--backbone",   choices=["efficientunet", "simclr"])
+    p.add_argument("--roi_ckpt",   help="Path to segment_part .pth checkpoint.")
+    p.add_argument("--proj_ckpt",  help="SimCLR projection head checkpoint (simclr only).")
+    p.add_argument("--n_iter",     type=int)
+    p.add_argument("--threshold",  type=float)
+    p.add_argument("--device",     help="Torch device, e.g. 'cpu', 'cuda', 'cuda:1'.")
+    p.add_argument("--batch_size", type=int)
+    p.add_argument("--num_workers",type=int)
     return p
+
+
+def _cfg_from_yaml(path: str) -> dict:
+    import yaml
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    d = raw.get("data",  {})
+    m = raw.get("model", {})
+    e = raw.get("eval",  {})
+    return {
+        "patches_dir": d.get("patches_dir"),
+        "splits_json": d.get("splits_json"),
+        "fold":        d.get("fold",          1),
+        "cls":         d.get("cls",           "all"),
+        "crop_size":   d.get("crop_size",     256),
+        "backbone":    m.get("backbone",      "efficientunet"),
+        "roi_ckpt":    m.get("roi_ckpt",      ""),
+        "proj_ckpt":   m.get("proj_ckpt",     ""),
+        "n_iter":      e.get("n_iter",        20),
+        "threshold":   e.get("threshold",     0.5),
+        "device":      e.get("device",        "cpu"),
+        "batch_size":  e.get("batch_size",    16),
+        "num_workers": e.get("num_workers",   4),
+    }
 
 
 def main() -> None:
     args = _build_parser().parse_args()
-    cfg  = EvalConfig(
-        patches_dir = args.patches_dir,
-        splits_json = args.splits_json,
-        fold        = args.fold,
-        cls         = args.cls,
-        crop_size   = args.crop_size,
-        backbone    = args.backbone,
-        roi_ckpt    = args.roi_ckpt,
-        proj_ckpt   = args.proj_ckpt,
-        n_iter      = args.n_iter,
-        threshold   = args.threshold,
-        device      = args.device,
-        batch_size  = args.batch_size,
-        num_workers = args.num_workers,
+
+    defaults = _cfg_from_yaml(args.config) if args.config else {}
+
+    def get(key, cast=None, fallback=None):
+        cli_val = getattr(args, key, None)
+        val = cli_val if cli_val is not None else defaults.get(key, fallback)
+        return cast(val) if (cast and val is not None) else val
+
+    patches_dir = get("patches_dir")
+    splits_json = get("splits_json")
+    roi_ckpt    = get("roi_ckpt", str, "")
+    if not patches_dir or not splits_json:
+        _build_parser().error(
+            "--patches_dir and --splits_json are required "
+            "(pass them directly or via --config)."
+        )
+    if not roi_ckpt:
+        _build_parser().error(
+            "--roi_ckpt is required (pass directly or set model.roi_ckpt in the YAML)."
+        )
+
+    cfg = EvalConfig(
+        patches_dir = patches_dir,
+        splits_json = splits_json,
+        fold        = get("fold",        int,   1),
+        cls         = get("cls",         str,   "all"),
+        crop_size   = get("crop_size",   int,   256),
+        backbone    = get("backbone",    str,   "efficientunet"),
+        roi_ckpt    = roi_ckpt,
+        proj_ckpt   = get("proj_ckpt",  str,   ""),
+        n_iter      = get("n_iter",      int,   20),
+        threshold   = get("threshold",   float, 0.5),
+        device      = get("device",      str,   "cpu"),
+        batch_size  = get("batch_size",  int,   16),
+        num_workers = get("num_workers", int,   4),
     )
 
     backbone_kwargs = {}

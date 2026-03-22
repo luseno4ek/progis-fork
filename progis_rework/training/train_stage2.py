@@ -265,44 +265,82 @@ def _build_parser() -> argparse.ArgumentParser:
         description="ProGIS Stage 2 training (P-RoISeg).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Data
-    p.add_argument("--patches_dir",  required=True,  help="Path to patches root directory.")
-    p.add_argument("--splits_json",  required=True,  help="Path to fold_splits.json.")
-    p.add_argument("--fold",         type=int,   default=1)
-    p.add_argument("--cls",          default="all",
-                   help="Class to train on: 'all' or a specific class name.")
-    p.add_argument("--crop_size",    type=int,   default=256)
-    # Hardware
-    p.add_argument("--device",       default="cpu",
-                   help="Torch device string, e.g. 'cpu', 'cuda', 'cuda:1'.")
-    p.add_argument("--batch_size",   type=int,   default=16)
-    p.add_argument("--num_workers",  type=int,   default=4)
-    # Optimiser
-    p.add_argument("--lr",           type=float, default=4e-4)
-    p.add_argument("--weight_decay", type=float, default=5e-5)
-    p.add_argument("--epochs",       type=int,   default=50)
-    # Output
-    p.add_argument("--checkpoint_dir", default="runs/stage2")
-    p.add_argument("--no_tensorboard", action="store_true")
+    p.add_argument("--config", default=None,
+                   help="Path to a YAML config file (e.g. progis_rework/configs/server_bcss.yaml). "
+                        "Individual flags below override the YAML values.")
+    # Overrides — all optional when --config is provided
+    p.add_argument("--patches_dir")
+    p.add_argument("--splits_json")
+    p.add_argument("--fold",           type=int)
+    p.add_argument("--cls")
+    p.add_argument("--crop_size",      type=int)
+    p.add_argument("--device",         help="Torch device string, e.g. 'cpu', 'cuda', 'cuda:1'.")
+    p.add_argument("--batch_size",     type=int)
+    p.add_argument("--num_workers",    type=int)
+    p.add_argument("--lr",             type=float)
+    p.add_argument("--weight_decay",   type=float)
+    p.add_argument("--epochs",         type=int)
+    p.add_argument("--checkpoint_dir")
+    p.add_argument("--no_tensorboard", action="store_true", default=False)
     return p
+
+
+def _cfg_from_yaml(path: str) -> dict:
+    import yaml
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    d = raw.get("data",   {})
+    s = raw.get("stage2", {})
+    return {
+        "patches_dir":    d.get("patches_dir"),
+        "splits_json":    d.get("splits_json"),
+        "fold":           d.get("fold",           1),
+        "cls":            d.get("cls",            "all"),
+        "crop_size":      d.get("crop_size",      256),
+        "device":         s.get("device",         "cpu"),
+        "batch_size":     s.get("batch_size",     16),
+        "num_workers":    s.get("num_workers",    4),
+        "lr":             s.get("lr",             4e-4),
+        "weight_decay":   s.get("weight_decay",   5e-5),
+        "epochs":         s.get("epochs",         50),
+        "checkpoint_dir": s.get("checkpoint_dir", "runs/stage2"),
+        "tensorboard":    s.get("tensorboard",    True),
+    }
 
 
 def main() -> None:
     args = _build_parser().parse_args()
+
+    # YAML provides base values; CLI flags override any of them
+    defaults = _cfg_from_yaml(args.config) if args.config else {}
+
+    def get(key, cast=None, fallback=None):
+        cli_val = getattr(args, key, None)
+        val = cli_val if cli_val is not None else defaults.get(key, fallback)
+        return cast(val) if (cast and val is not None) else val
+
+    patches_dir = get("patches_dir")
+    splits_json = get("splits_json")
+    if not patches_dir or not splits_json:
+        _build_parser().error(
+            "--patches_dir and --splits_json are required "
+            "(pass them directly or via --config)."
+        )
+
     cfg = TrainConfig(
-        patches_dir     = args.patches_dir,
-        splits_json     = args.splits_json,
-        fold            = args.fold,
-        cls             = args.cls,
-        crop_size       = args.crop_size,
-        device          = args.device,
-        batch_size      = args.batch_size,
-        num_workers     = args.num_workers,
-        lr              = args.lr,
-        weight_decay    = args.weight_decay,
-        epochs          = args.epochs,
-        checkpoint_dir  = args.checkpoint_dir,
-        tensorboard     = not args.no_tensorboard,
+        patches_dir     = patches_dir,
+        splits_json     = splits_json,
+        fold            = get("fold",           int,   1),
+        cls             = get("cls",            str,   "all"),
+        crop_size       = get("crop_size",      int,   256),
+        device          = get("device",         str,   "cpu"),
+        batch_size      = get("batch_size",     int,   16),
+        num_workers     = get("num_workers",    int,   4),
+        lr              = get("lr",             float, 4e-4),
+        weight_decay    = get("weight_decay",   float, 5e-5),
+        epochs          = get("epochs",         int,   50),
+        checkpoint_dir  = get("checkpoint_dir", str,   "runs/stage2"),
+        tensorboard     = defaults.get("tensorboard", True) and not args.no_tensorboard,
     )
     train(cfg)
 
