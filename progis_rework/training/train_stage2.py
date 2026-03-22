@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -86,8 +87,10 @@ def train(cfg: TrainConfig) -> None:
     Load it at inference time via ProGISModel.from_checkpoint().
     """
     device = torch.device(cfg.device)
-    ckpt_dir = Path(cfg.checkpoint_dir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    ckpt_dir = Path(cfg.checkpoint_dir) / timestamp
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Checkpoint dir: {ckpt_dir}")
 
     # ── Datasets ─────────────────────────────────────────────────────────────
     train_dataset = RoISegDataset(

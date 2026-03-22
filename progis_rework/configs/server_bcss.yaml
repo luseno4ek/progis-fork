@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ProGIS — Server BCSS configuration (histology server, CUDA)
+#
+# Data layout on server:
+#   /srv/data1/data_repository/BCSS/patches/
+#     all/image_npy/
+#     tumor/mask_npy/  tumor/signal_all_line_npy/
+#     stroma/...       inflammatory_infiltration/...  etc.
+#     fold_splits.json
+#
+# Stage 2 training (full, 50 epochs):
+#   python -m progis_rework.training.train_stage2 \
+#       --patches_dir  /srv/data1/data_repository/BCSS/patches \
+#       --splits_json  /srv/data1/data_repository/BCSS/patches/fold_splits.json \
+#       --fold 1 --cls all \
+#       --epochs 50 --batch_size 16 --num_workers 4 \
+#       --device cuda \
+#       --checkpoint_dir runs/stage2/fold1
+#
+# Evaluation (NoI metric, n_iter=20):
+#   python -m progis_rework.inference.evaluate \
+#       --patches_dir  /srv/data1/data_repository/BCSS/patches \
+#       --splits_json  /srv/data1/data_repository/BCSS/patches/fold_splits.json \
+#       --fold 1 --cls all \
+#       --roi_ckpt     runs/stage2/fold1/stage2_best.pth \
+#       --backbone     efficientunet \
+#       --n_iter 20 --batch_size 16 --num_workers 4 \
+#       --device cuda
+# ─────────────────────────────────────────────────────────────────────────────
+
+data:
+  patches_dir:  /srv/data1/data_repository/BCSS/patches
+  splits_json:  /srv/data1/data_repository/BCSS/patches/fold_splits.json
+  fold:         1
+  cls:          all          # all tissue classes jointly
+  crop_size:    256
+
+model:
+  backbone:      efficientunet
+  roi_ckpt:      ""           # fill after training: runs/stage2/fold1/stage2_best.pth
+  proj_ckpt:     ""
+  threshold:     0.5
+  seg_threshold: 0.95
+
+stage2:
+  epochs:         50
+  batch_size:     16
+  num_workers:    4
+  lr:             4.0e-4
+  weight_decay:   5.0e-5
+  device:         cuda
+  checkpoint_dir: runs/stage2/fold1
+  tensorboard:    true
+
+eval:
+  n_iter:      20
+  threshold:   0.5
+  batch_size:  16
+  num_workers: 4
+  device:      cuda
+  results_dir: ""
+
+api:
+  host:      "0.0.0.0"
+  port:      8000
+  device:    cuda
+  crop_size: 256
