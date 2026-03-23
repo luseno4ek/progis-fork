@@ -36,6 +36,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -74,6 +75,30 @@ class TrainConfig:
 
     # Inference signals: use GPU-accelerated process_masks when on CUDA
     use_gpu_signals: bool  = False
+
+
+# ── Loss ──────────────────────────────────────────────────────────────────────
+
+def cu_loss(
+    pred1: torch.Tensor,
+    pred2: torch.Tensor,
+    masks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    CU-Training loss: Dice + BCE for both passes.
+
+    BCE prevents the all-foreground local minimum by providing non-zero
+    gradient even when sigmoid is saturated (grad = pred - gt ≠ 0).
+
+    Returns:
+        (loss, l1_dice, l2_dice)  — total scalar loss and per-pass Dice components
+        for diagnostic logging.
+    """
+    l1 = dice_loss(pred1, masks)
+    l2 = dice_loss(pred2, masks)
+    bce1 = F.binary_cross_entropy(pred1, masks)
+    bce2 = F.binary_cross_entropy(pred2, masks)
+    return l1 + l2 + bce1 + bce2, l1, l2
 
 
 # ── Training function ─────────────────────────────────────────────────────────
@@ -161,10 +186,7 @@ def train(cfg: TrainConfig) -> None:
             pred1_bin = (pred1 >= 0.5).float()
             pred2 = model.segment(images, pred1_bin, union_signal)
 
-            # CU-Training loss: sum of both Dice losses
-            l1 = dice_loss(pred1, masks)
-            l2 = dice_loss(pred2, masks)
-            loss = l1 + l2
+            loss, l1, l2 = cu_loss(pred1, pred2, masks)
             loss.backward()
             optimizer.step()
 
@@ -210,9 +232,8 @@ def train(cfg: TrainConfig) -> None:
 
                 pred2 = model.segment(images, (pred1 >= 0.5).float(), union_signal)
 
-                vl1 = dice_loss(pred1, masks)
-                vl2 = dice_loss(pred2, masks)
-                val_loss += (vl1 + vl2).item() * B
+                batch_loss, vl1, vl2 = cu_loss(pred1, pred2, masks)
+                val_loss += batch_loss.item() * B
 
                 preds_bin = (pred2 >= 0.5).float()
                 val_dice += dice_coeff(preds_bin, masks).item() * B

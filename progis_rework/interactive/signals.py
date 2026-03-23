@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from scipy.ndimage import distance_transform_edt
 from skimage.measure import label as skimage_label
+from skimage.measure import label as label_1
 from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 
