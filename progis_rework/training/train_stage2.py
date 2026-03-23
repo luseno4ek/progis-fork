@@ -73,6 +73,9 @@ class TrainConfig:
     checkpoint_dir:  str   = "runs/stage2"
     tensorboard:     bool  = True
 
+    # Reproducibility
+    seed:            int   = 42
+
     # Inference signals: use GPU-accelerated process_masks when on CUDA
     use_gpu_signals: bool  = False
 
@@ -111,6 +114,9 @@ def train(cfg: TrainConfig) -> None:
     The saved checkpoint (stage2_best.pth) is segment_part.state_dict().
     Load it at inference time via ProGISModel.from_checkpoint().
     """
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+
     device = torch.device(cfg.device)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     ckpt_dir = Path(cfg.checkpoint_dir) / timestamp
@@ -336,6 +342,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--epochs",         type=int)
     p.add_argument("--checkpoint_dir")
     p.add_argument("--no_tensorboard", action="store_true", default=False)
+    p.add_argument("--seed",           type=int)
     return p
 
 
@@ -359,6 +366,7 @@ def _cfg_from_yaml(path: str) -> dict:
         "epochs":         s.get("epochs",         50),
         "checkpoint_dir": s.get("checkpoint_dir", "runs/stage2"),
         "tensorboard":    s.get("tensorboard",    True),
+        "seed":           s.get("seed",           42),
     }
 
 
@@ -395,6 +403,7 @@ def main() -> None:
         epochs          = get("epochs",         int,   50),
         checkpoint_dir  = get("checkpoint_dir", str,   "runs/stage2"),
         tensorboard     = defaults.get("tensorboard", True) and not args.no_tensorboard,
+        seed            = get("seed", int, 42),
     )
     train(cfg)
 
