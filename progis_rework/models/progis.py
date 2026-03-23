@@ -102,7 +102,7 @@ class ProGISModel(nn.Module):
         seg_threshold: float = 0.95,
     ):
         super().__init__()
-        from efficientunet import get_efficientunet_b0
+        from models.efficientunet import get_efficientunet_b0
         self.backbone      = backbone
         self.segment_part  = get_efficientunet_b0(
             out_channels=1, concat_input=True, pretrained=False, backbone=False

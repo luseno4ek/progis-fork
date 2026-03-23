@@ -133,6 +133,7 @@ def train(cfg: TrainConfig) -> None:
         # ── Train ─────────────────────────────────────────────────────────
         model.train()
         train_loss = train_dice = 0.0
+        dbg_l1 = dbg_l2 = dbg_p1fg = dbg_p2fg = dbg_signz = 0.0
 
         train_bar = tqdm(
             train_loader,
@@ -171,6 +172,12 @@ def train(cfg: TrainConfig) -> None:
             train_dice += dice_coeff((pred2 >= 0.5).float(), masks).item() * B
             train_bar.set_postfix(loss=f"{loss.item():.4f}")
 
+            dbg_l1    += l1.item() * B
+            dbg_l2    += l2.item() * B
+            dbg_p1fg  += (pred1 >= 0.5).float().mean().item() * B
+            dbg_p2fg  += (pred2 >= 0.5).float().mean().item() * B
+            dbg_signz += union_signal.bool().float().mean().item() * B
+
         n_train = len(train_loader.dataset)
         train_loss /= n_train
         train_dice /= n_train
@@ -179,6 +186,7 @@ def train(cfg: TrainConfig) -> None:
         model.eval()
         val_loss = val_dice = 0.0
         miou_scores: list[float] = []
+        dbg_vl1 = dbg_vl2 = dbg_vp1fg = dbg_vp2fg = dbg_vsignz = 0.0
 
         with torch.no_grad():
             val_bar = tqdm(
@@ -209,6 +217,12 @@ def train(cfg: TrainConfig) -> None:
                 preds_bin = (pred2 >= 0.5).float()
                 val_dice += dice_coeff(preds_bin, masks).item() * B
 
+                dbg_vl1   += vl1.item() * B
+                dbg_vl2   += vl2.item() * B
+                dbg_vp1fg += (pred1 >= 0.5).float().mean().item() * B
+                dbg_vp2fg += (pred2 >= 0.5).float().mean().item() * B
+                dbg_vsignz += union_signal.bool().float().mean().item() * B
+
                 # Per-sample mIoU
                 for pred, mask in zip(preds_bin, masks):
                     miou = compute_miou_binary(pred, mask)
@@ -220,11 +234,30 @@ def train(cfg: TrainConfig) -> None:
         val_dice /= n_val
         mean_miou = float(np.mean(miou_scores)) if miou_scores else 0.0
 
+        # ── Gradient norm (after last train batch) ────────────────────────
+        grad_norm = sum(
+            p.grad.norm().item() ** 2
+            for g in optimizer.param_groups
+            for p in g["params"]
+            if p.grad is not None
+        ) ** 0.5
+
         # ── Logging ───────────────────────────────────────────────────────
+        N_tr = len(train_loader.dataset)
         print(
             f"Epoch {epoch+1:3d}/{cfg.epochs} | "
             f"Train loss={train_loss:.4f} dice={train_dice:.4f} | "
             f"Val loss={val_loss:.4f} dice={val_dice:.4f} mIoU={mean_miou:.4f}"
+        )
+        print(
+            f"  [DBG train] l1={dbg_l1/N_tr:.4f} l2={dbg_l2/N_tr:.4f} "
+            f"p1fg={dbg_p1fg/N_tr:.3f} p2fg={dbg_p2fg/N_tr:.3f} "
+            f"signal_nz={dbg_signz/N_tr:.4f} grad_norm={grad_norm:.4f}"
+        )
+        print(
+            f"  [DBG val]   l1={dbg_vl1/n_val:.4f} l2={dbg_vl2/n_val:.4f} "
+            f"p1fg={dbg_vp1fg/n_val:.3f} p2fg={dbg_vp2fg/n_val:.3f} "
+            f"signal_nz={dbg_vsignz/n_val:.4f}"
         )
 
         if writer is not None:
