@@ -128,6 +128,7 @@ def train(cfg: TrainConfig) -> None:
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_dice = 0.0
+    _diag_done = False  # one-shot diagnostics flag
 
     for epoch in range(cfg.epochs):
         # ── Train ─────────────────────────────────────────────────────────
@@ -165,6 +166,52 @@ def train(cfg: TrainConfig) -> None:
             l2 = dice_loss(pred2, masks)
             loss = l1 + l2
             loss.backward()
+
+            # ── One-shot diagnostics (first batch of first epoch) ────────
+            if not _diag_done:
+                _diag_done = True
+                n_opt_params = sum(
+                    p.numel() for g in optimizer.param_groups for p in g["params"]
+                )
+                grad_norm = sum(
+                    p.grad.norm().item() ** 2
+                    for g in optimizer.param_groups
+                    for p in g["params"]
+                    if p.grad is not None
+                ) ** 0.5
+                n_zero_grad = sum(
+                    1 for g in optimizer.param_groups
+                    for p in g["params"]
+                    if p.grad is None
+                )
+                print(
+                    f"\n[DIAG] Optimizer params: {n_opt_params:,} | "
+                    f"Grad norm: {grad_norm:.4f} | "
+                    f"Params with no grad: {n_zero_grad}"
+                )
+                print(
+                    f"[DIAG] images  range [{images.min():.1f}, {images.max():.1f}]"
+                )
+                print(
+                    f"[DIAG] masks   range [{masks.min():.3f}, {masks.max():.3f}]  "
+                    f"fg_ratio={masks.mean():.3f}"
+                )
+                print(
+                    f"[DIAG] signals range [{signals.min():.3f}, {signals.max():.3f}]  "
+                    f"nonzero={signals.bool().float().mean():.4f}"
+                )
+                print(
+                    f"[DIAG] pred1   range [{pred1.min():.3f}, {pred1.max():.3f}]  "
+                    f"mean={pred1.mean():.3f}"
+                )
+                print(
+                    f"[DIAG] new_signal nonzero={new_signal.bool().float().mean():.4f}  "
+                    f"(correction signal from process_masks)"
+                )
+                print(
+                    f"[DIAG] l1={l1.item():.4f}  l2={l2.item():.4f}\n"
+                )
+
             optimizer.step()
 
             train_loss += loss.item() * B
