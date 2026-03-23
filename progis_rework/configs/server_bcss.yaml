@@ -41,7 +41,7 @@ stage2:
   batch_size:     16
   num_workers:    4
   lr:             4.0e-4
-  weight_decay:   5.0e-5
+  weight_decay:   0.0
   device:         cuda
   checkpoint_dir: runs/stage2/fold1
   tensorboard:    true

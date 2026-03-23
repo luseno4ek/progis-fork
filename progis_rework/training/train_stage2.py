@@ -65,7 +65,7 @@ class TrainConfig:
 
     # Optimiser
     lr:              float = 4e-4
-    weight_decay:    float = 5e-5
+    weight_decay:    float = 0.0
     epochs:          int   = 50
 
     # Output
@@ -348,7 +348,7 @@ def _cfg_from_yaml(path: str) -> dict:
         "batch_size":     s.get("batch_size",     16),
         "num_workers":    s.get("num_workers",    4),
         "lr":             s.get("lr",             4e-4),
-        "weight_decay":   s.get("weight_decay",   5e-5),
+        "weight_decay":   s.get("weight_decay",   0.0),
         "epochs":         s.get("epochs",         50),
         "checkpoint_dir": s.get("checkpoint_dir", "runs/stage2"),
         "tensorboard":    s.get("tensorboard",    True),
@@ -384,7 +384,7 @@ def main() -> None:
         batch_size      = get("batch_size",     int,   16),
         num_workers     = get("num_workers",    int,   4),
         lr              = get("lr",             float, 4e-4),
-        weight_decay    = get("weight_decay",   float, 5e-5),
+        weight_decay    = get("weight_decay",   float, 0.0),
         epochs          = get("epochs",         int,   50),
         checkpoint_dir  = get("checkpoint_dir", str,   "runs/stage2"),
         tensorboard     = defaults.get("tensorboard", True) and not args.no_tensorboard,
