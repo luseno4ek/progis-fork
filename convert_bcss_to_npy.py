@@ -34,6 +34,7 @@
 
 import json
 import numpy as np
+import cv2
 from PIL import Image, ImageFile
 from pathlib import Path
 import argparse
@@ -82,16 +83,20 @@ def downsample_mask(mask: np.ndarray, factor: int) -> np.ndarray:
 # skipped (images saved as-is).
 
 def _rgb_to_lab(image: np.ndarray) -> np.ndarray:
-    """RGB uint8 → CIE LAB float32 (D65 illuminant)."""
-    pil = Image.fromarray(image).convert('LAB')
-    return np.array(pil, dtype=np.float32)
+    """RGB uint8 → CIE LAB float32.
+
+    Uses OpenCV (COLOR_RGB2LAB) which encodes a/b with neutral=128,
+    so all three channels are valid unsigned uint8 values and mean/std
+    statistics are correct for Reinhard normalization.
+    (PIL's LAB uses neutral=0 for a/b, causing uint8 wrap-around.)
+    """
+    return cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
 
 
 def _lab_to_rgb(lab: np.ndarray) -> np.ndarray:
     """CIE LAB float32 → RGB uint8 (clipped to [0, 255])."""
     lab_clipped = np.clip(lab, 0, 255).astype(np.uint8)
-    pil = Image.fromarray(lab_clipped, mode='LAB').convert('RGB')
-    return np.array(pil, dtype=np.uint8)
+    return cv2.cvtColor(lab_clipped, cv2.COLOR_LAB2RGB)
 
 
 def compute_lab_stats(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
