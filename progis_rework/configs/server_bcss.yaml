@@ -58,7 +58,7 @@ stage2:
 
 eval:
   n_iter:      20
-  threshold:   0.5
+  threshold:   0.85
   batch_size:  16
   num_workers: 4
   device:      cuda:1
