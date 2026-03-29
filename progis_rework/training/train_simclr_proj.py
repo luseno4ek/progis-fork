@@ -120,7 +120,8 @@ def prototype_align_loss(
     # Skip samples with no fg (clamp avoids log(0) in BCE)
     has_fg = (masks.sum(dim=(2, 3)) > 0).float().view(-1, 1, 1, 1)
     loss = F.binary_cross_entropy(sim_01.clamp(1e-6, 1 - 1e-6), masks, reduction="none")
-    loss = (loss * has_fg).sum() / has_fg.sum().clamp(min=1)
+    # Mean over all B×1×H×W positions (not sum/n_samples — that would scale by n_pixels)
+    loss = (loss * has_fg).mean()
 
     return loss
 
