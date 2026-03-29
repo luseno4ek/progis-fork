@@ -89,41 +89,63 @@ class TrainConfig:
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
 
-def prototype_align_loss(
-    features: torch.Tensor,   # [B, C, H, W]
-    masks:    torch.Tensor,   # [B, 1, H, W]  binary float
+def contrastive_proto_loss(
+    features:    torch.Tensor,   # [B, C, H, W]
+    masks:       torch.Tensor,   # [B, 1, H, W]  binary float
+    temperature: float = 0.1,
 ) -> torch.Tensor:
     """
-    Prototype alignment BCE loss.
+    Pixel-level contrastive prototype loss.
 
-    For each sample, computes a prototype as the mean normalised feature
-    at foreground pixels, then measures cosine similarity of every pixel
-    to that prototype. BCE drives fg pixels toward high similarity (→1)
-    and bg pixels toward low similarity (→0).
+    For each image, computes fg and bg centroids (with stop-gradient),
+    then trains each pixel to classify itself as "closer to fg centroid"
+    or "closer to bg centroid" via 2-class cross-entropy.
 
-    Samples with no foreground are skipped.
+    Stop-gradient on prototypes breaks the circular dependency of BCE
+    prototype alignment (where fg pixels have near-zero gradient because
+    they already match their own mean).
+
+    Args:
+        features:    [B, C, H, W] raw projection output.
+        masks:       [B, 1, H, W] binary float foreground mask.
+        temperature: softmax temperature; lower = harder boundaries.
+
+    Returns:
+        Scalar loss.
     """
     feat_norm = F.normalize(features, dim=1)   # [B, C, H, W]
+    bg_mask   = 1.0 - masks
 
-    fg_count  = masks.sum(dim=(2, 3), keepdim=True).clamp(min=1)   # [B,1,1,1]
-    prototype = (feat_norm * masks).sum(dim=(2, 3), keepdim=True) / fg_count  # [B,C,1,1]
-    proto_norm = F.normalize(
-        prototype.squeeze(-1).squeeze(-1), dim=1
-    )                                                                # [B, C]
+    fg_count = masks.sum(dim=(2, 3)).clamp(min=1)    # [B, 1]
+    bg_count = bg_mask.sum(dim=(2, 3)).clamp(min=1)  # [B, 1]
 
-    # Cosine similarity: [B, 1, H, W]
-    sim = torch.einsum("bchw,bc->bhw", feat_norm, proto_norm).unsqueeze(1)
+    # Prototypes are fixed targets — detach to break circular dependency
+    with torch.no_grad():
+        fg_proto = F.normalize(
+            (feat_norm * masks).sum(dim=(2, 3)) / fg_count, dim=1
+        )   # [B, C]
+        bg_proto = F.normalize(
+            (feat_norm * bg_mask).sum(dim=(2, 3)) / bg_count, dim=1
+        )   # [B, C]
 
-    # Map [-1,1] → [0,1] for BCE
-    sim_01 = (sim + 1.0) / 2.0
+    # Per-pixel similarity to each prototype
+    sim_fg = torch.einsum("bchw,bc->bhw", feat_norm, fg_proto).unsqueeze(1)  # [B,1,H,W]
+    sim_bg = torch.einsum("bchw,bc->bhw", feat_norm, bg_proto).unsqueeze(1)  # [B,1,H,W]
 
-    # Skip samples with no fg (clamp avoids log(0) in BCE)
-    has_fg = (masks.sum(dim=(2, 3)) > 0).float().view(-1, 1, 1, 1)
-    loss = F.binary_cross_entropy(sim_01.clamp(1e-6, 1 - 1e-6), masks, reduction="none")
-    # Mean over all B×1×H×W positions (not sum/n_samples — that would scale by n_pixels)
-    loss = (loss * has_fg).mean()
+    logits = torch.cat([sim_fg, sim_bg], dim=1) / temperature  # [B, 2, H, W]
 
-    return loss
+    # Class 0 = fg (closer to fg_proto), Class 1 = bg (closer to bg_proto)
+    target = (bg_mask.squeeze(1)).long()   # [B, H, W]: 0 for fg, 1 for bg
+
+    # Only include samples that have both fg and bg pixels
+    has_both = (
+        (masks.sum(dim=(2, 3)) > 0) & (bg_mask.sum(dim=(2, 3)) > 0)
+    ).squeeze(1)   # [B]
+
+    if not has_both.any():
+        return features.sum() * 0.0   # preserve grad_fn
+
+    return F.cross_entropy(logits[has_both], target[has_both])
 
 
 # ── Training loop ──────────────────────────────────────────────────────────────
@@ -186,7 +208,7 @@ def train(cfg: TrainConfig) -> None:
             masks  = batch[1].to(device)   # [B, 1, H, W]
 
             features = extractor(images)   # [B, proj_channels, H, W]
-            loss = prototype_align_loss(features, masks)
+            loss = contrastive_proto_loss(features, masks)
 
             optimizer.zero_grad()
             loss.backward()
@@ -207,17 +229,21 @@ def train(cfg: TrainConfig) -> None:
                 masks  = batch[1].to(device)
 
                 features = extractor(images)
-                loss = prototype_align_loss(features, masks)
+                loss = contrastive_proto_loss(features, masks)
                 val_losses.append(loss.item())
 
-                # Dice: threshold sim_01 at 0.5 (= cosine sim > 0)
-                feat_norm  = F.normalize(features, dim=1)
-                fg_count   = masks.sum(dim=(2, 3), keepdim=True).clamp(min=1)
-                prototype  = (feat_norm * masks).sum(dim=(2, 3), keepdim=True) / fg_count
-                proto_norm = F.normalize(prototype.squeeze(-1).squeeze(-1), dim=1)
-                sim_01 = (torch.einsum("bchw,bc->bhw", feat_norm, proto_norm).unsqueeze(1) + 1.0) / 2.0
+                # Dice: predict fg where sim_to_fg > sim_to_bg (matches inference logic)
+                feat_norm = F.normalize(features, dim=1)
+                bg_mask   = 1.0 - masks
+                fg_count  = masks.sum(dim=(2, 3)).clamp(min=1)
+                bg_count  = bg_mask.sum(dim=(2, 3)).clamp(min=1)
+                fg_proto  = F.normalize((feat_norm * masks).sum(dim=(2, 3)) / fg_count, dim=1)
+                bg_proto  = F.normalize((feat_norm * bg_mask).sum(dim=(2, 3)) / bg_count, dim=1)
+                sim_fg = torch.einsum("bchw,bc->bhw", feat_norm, fg_proto).unsqueeze(1)
+                sim_bg = torch.einsum("bchw,bc->bhw", feat_norm, bg_proto).unsqueeze(1)
+                pred = (sim_fg > sim_bg).float()   # [B, 1, H, W]
 
-                for p, m in zip(sim_01, masks):
+                for p, m in zip(pred, masks):
                     d = compute_dice_binary(p, m)
                     if not np.isnan(d):
                         val_dices.append(d)
