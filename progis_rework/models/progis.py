@@ -229,6 +229,20 @@ class ProGISModel(nn.Module):
 
         proto_mask = (sim_norm > threshold).float()
 
+        # DBG: check prototype vector and similarity map
+        for b in range(B):
+            proto_norm_b = proto_norm[b]
+            has_nan = torch.isnan(proto_norm_b).any().item()
+            proto_mag = prototype[b].norm().item()
+            sim_b = sim[b, 0]
+            sim_norm_b = sim_norm[b, 0]
+            pm_fg = proto_mask[b, 0].sum().item()
+            print(f"[DBG similarity] b={b} "
+                  f"prototype norm={proto_mag:.4f} has_nan={has_nan} "
+                  f"sim raw=[{sim_b.min():.3f},{sim_b.max():.3f}] "
+                  f"sim_norm=[{sim_norm_b.min():.3f},{sim_norm_b.max():.3f}] "
+                  f"threshold={threshold} proto_mask fg_px={int(pm_fg)}")
+
         return PrototypeOutput(
             prototype_mask = proto_mask,
             roi_mask       = roi_mask,
