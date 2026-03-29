@@ -32,9 +32,21 @@ data:
 model:
   backbone:      efficientunet
   roi_ckpt:      ""           # fill after training: runs/stage2/fold1/stage2_best.pth
-  proj_ckpt:     ""
+  proj_ckpt:     ""           # fill after simclr_proj training (simclr backbone only)
   threshold:     0.5
   seg_threshold: 0.95
+
+simclr_proj:
+  proj_channels:  32
+  epochs:         10
+  batch_size:     16
+  num_workers:    4
+  lr:             1.0e-3
+  weight_decay:   0.0
+  device:         cuda:1
+  checkpoint_dir: runs/simclr_proj/fold1
+  tensorboard:    true
+  seed:           42
 
 stage2:
   epochs:         50
