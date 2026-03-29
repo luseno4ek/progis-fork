@@ -128,7 +128,7 @@ class SimCLRBackbone(FeatureExtractorBase):
         freeze_encoder: bool = True,
     ):
         super().__init__()
-        from simclr_feature_extractor import SimCLRFeatureExtractor
+        from progis_rework.models.simclr_feature_extractor import SimCLRFeatureExtractor
         self.extractor = SimCLRFeatureExtractor(proj_channels=proj_channels)
 
         if not freeze_encoder:

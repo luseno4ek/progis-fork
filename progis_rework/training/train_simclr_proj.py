@@ -39,7 +39,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -54,10 +53,6 @@ from tqdm import tqdm
 from progis_rework.data.dataset import RoISegDataset
 from progis_rework.models.losses import compute_dice_binary
 
-# SimCLRFeatureExtractor lives in the original models/ directory
-_MODELS_DIR = Path(__file__).parents[3] / "models"
-if str(_MODELS_DIR) not in sys.path:
-    sys.path.insert(0, str(_MODELS_DIR))
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -139,7 +134,7 @@ def train(cfg: TrainConfig) -> None:
     device = torch.device(cfg.device)
 
     # ── Model ────────────────────────────────────────────────────────────────
-    from simclr_feature_extractor import SimCLRFeatureExtractor
+    from progis_rework.models.simclr_feature_extractor import SimCLRFeatureExtractor
     extractor = SimCLRFeatureExtractor(proj_channels=cfg.proj_channels).to(device)
 
     # Optimise only the projection head
