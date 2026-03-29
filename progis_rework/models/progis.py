@@ -172,6 +172,14 @@ class ProGISModel(nn.Module):
 
         roi_mask = (roi_seg > self.seg_threshold).float()            # binary at 0.95
 
+        # DBG: check if roi_mask is empty after thresholding
+        for b in range(B):
+            fg_px = roi_mask[b].sum().item()
+            seg_max = roi_seg[b].max().item()
+            seg_mean = roi_seg[b].mean().item()
+            print(f"[DBG forward_prototype] b={b} roi_seg max={seg_max:.3f} mean={seg_mean:.3f} "
+                  f"roi_mask fg_px={int(fg_px)} (seg_threshold={self.seg_threshold})")
+
         # ── 2. Backbone feature extraction ───────────────────────────────────
         if self.backbone is None:
             raise RuntimeError(
