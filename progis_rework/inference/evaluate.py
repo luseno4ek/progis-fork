@@ -404,6 +404,7 @@ def main() -> None:
             val_dataset = RoISegDataset(
                 cfg.patches_dir, cfg.splits_json,
                 fold=cfg.fold, split="val", cls=cls, crop_size=cfg.crop_size,
+                full_patch=True,
             )
             if len(val_dataset) == 0:
                 print(f"[{cls}] no val samples, skipping.")
@@ -418,6 +419,7 @@ def main() -> None:
         val_dataset = RoISegDataset(
             cfg.patches_dir, cfg.splits_json,
             fold=cfg.fold, split="val", cls=cfg.cls, crop_size=cfg.crop_size,
+            full_patch=True,
         )
         val_loader = DataLoader(
             val_dataset, batch_size=cfg.batch_size,

@@ -83,10 +83,6 @@ model:
   roi_ckpt:  ""   # path to stage2_best.pth
   proj_ckpt: ""   # SimCLR projection head checkpoint (leave empty for efficientunet)
 
-  # Thresholds
-  threshold:     0.5    # cosine similarity → binary prototype mask
-  seg_threshold: 0.95   # minimum similarity to include a pixel in the prototype average
-
 
 # ── Stage 1 training (optional — only if you want domain-adapted backbone) ───
 
@@ -117,7 +113,7 @@ stage2:
 
 eval:
   n_iter:      20      # max correction iterations (NoI metric)
-  threshold:   0.5
+  threshold:   0.5    # cosine similarity threshold → binary prototype mask
   batch_size:  16
   num_workers: 4
   device:      cpu

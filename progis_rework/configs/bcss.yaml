@@ -62,13 +62,6 @@ model:
   roi_ckpt:  ""    # Stage 2 segment_part weights (required for inference)
   proj_ckpt: ""    # SimCLR projection head (only used when backbone=simclr)
 
-  # Prototype initialisation threshold (cosine similarity → binary mask)
-  threshold: 0.5
-
-  # Prototype selection: pixels with similarity >= seg_threshold are used
-  # to average features into the prototype vector
-  seg_threshold: 0.95
-
 
 # ── Stage 1 training (Feature Extractor / Backbone) ──────────────────────────
 

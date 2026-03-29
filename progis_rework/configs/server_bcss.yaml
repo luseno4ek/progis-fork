@@ -33,8 +33,6 @@ model:
   backbone:      efficientunet
   roi_ckpt:      ""           # fill after training: runs/stage2/fold1/stage2_best.pth
   proj_ckpt:     ""           # fill after simclr_proj training (simclr backbone only)
-  threshold:     0.5
-  seg_threshold: 0.95
 
 simclr_proj:
   proj_channels:  32

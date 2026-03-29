@@ -76,10 +76,12 @@ class RoISegDataset(Dataset):
         fold:        int,
         split:       str,
         cls:         str,
-        crop_size:   int = 256,
+        crop_size:   int  = 256,
+        full_patch:  bool = False,
     ):
         self.patches_dir = Path(patches_dir)
         self.crop_size   = crop_size
+        self.full_patch  = full_patch
 
         fold_splits = load_fold_splits(splits_path)
         valid_stems = set(fold_splits[f"fold_{fold}"][split])
@@ -112,21 +114,24 @@ class RoISegDataset(Dataset):
         mask   = np.load(self.patches_dir / cls    / "mask_npy"              / fname)  # [H,W]
         signal = np.load(self.patches_dir / cls    / "signal_all_line_npy"   / fname)  # [2,H,W]
 
-        # Crop centred on the foreground signal
-        H, W = image.shape[:2]
-        fg_ys, fg_xs = np.where(signal[0] > 0)
-        if fg_ys.size > 0:
-            cy = int(round(fg_ys.mean()))
-            cx = int(round(fg_xs.mean()))
-            sy = min(max(cy - crop // 2, 0), H - crop)
-            sx = min(max(cx - crop // 2, 0), W - crop)
-        else:
-            sy = np.random.randint(0, H - crop + 1)
-            sx = np.random.randint(0, W - crop + 1)
+        if not self.full_patch:
+            # Training: crop 256×256 centred on the foreground signal.
+            # segment_part (6-ch UNet) always receives crop_size×crop_size input.
+            H, W = image.shape[:2]
+            fg_ys, fg_xs = np.where(signal[0] > 0)
+            if fg_ys.size > 0:
+                cy = int(round(fg_ys.mean()))
+                cx = int(round(fg_xs.mean()))
+                sy = min(max(cy - crop // 2, 0), H - crop)
+                sx = min(max(cx - crop // 2, 0), W - crop)
+            else:
+                sy = np.random.randint(0, H - crop + 1)
+                sx = np.random.randint(0, W - crop + 1)
 
-        image  = image[sy:sy+crop, sx:sx+crop, :]
-        mask   = mask[sy:sy+crop, sx:sx+crop]
-        signal = signal[:, sy:sy+crop, sx:sx+crop]
+            image  = image[sy:sy+crop, sx:sx+crop, :]
+            mask   = mask[sy:sy+crop, sx:sx+crop]
+            signal = signal[:, sy:sy+crop, sx:sx+crop]
+        # else: full_patch=True — return the full patch as-is (for inference).
 
         image  = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32)
         mask   = torch.tensor(mask,   dtype=torch.float32).unsqueeze(0)
