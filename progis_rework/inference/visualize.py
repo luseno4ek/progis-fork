@@ -12,18 +12,26 @@ multiple GT masks), runs 20-iteration inference for each class, and produces:
   2. (opt) GIF: animated prediction + accumulated scribbles over all iterations
 
 Usage (from project root):
+    # Via YAML config (recommended — reads data.patches_dir, data.splits_json,
+    # data.fold, data.crop_size, eval.threshold, eval.device automatically):
     python -m progis_rework.inference.visualize \\
-        --roi_ckpt   runs/stage2/fold1/.../stage2_best.pth \\
-        --patches_dir /srv/.../BCSS/patches \\
-        --splits_json /srv/.../BCSS/patches/fold_splits.json \\
-        --fold 1 --n_samples 2 --animate
+        --config    progis_rework/configs/server_bcss.yaml \\
+        --roi_ckpt  runs/stage2/fold1/.../stage2_best.pth \\
+        --n_samples 2 --animate
 
     # With SimCLR backbone:
     python -m progis_rework.inference.visualize \\
+        --config    progis_rework/configs/server_bcss.yaml \\
         --roi_ckpt  runs/stage2/fold1/.../stage2_best.pth \\
         --backbone  simclr \\
-        --proj_ckpt runs/simclr_proj/fold1/.../simclr_proj_best.pth \\
-        --patches_dir ... --splits_json ...
+        --proj_ckpt runs/simclr_proj/fold1/.../simclr_proj_best.pth
+
+    # All flags explicit (no config):
+    python -m progis_rework.inference.visualize \\
+        --roi_ckpt    runs/stage2/fold1/.../stage2_best.pth \\
+        --patches_dir /srv/.../BCSS/patches \\
+        --splits_json /srv/.../BCSS/patches/fold_splits.json \\
+        --fold 1 --device cuda:1 --n_samples 2 --animate
 """
 
 from __future__ import annotations
@@ -413,22 +421,53 @@ def make_animation(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def _cfg_from_yaml(path: str) -> dict:
+    import yaml
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    d = raw.get("data",  {})
+    m = raw.get("model", {})
+    e = raw.get("eval",  {})
+    return {
+        "patches_dir": d.get("patches_dir"),
+        "splits_json": d.get("splits_json"),
+        "fold":        d.get("fold",       1),
+        "crop_size":   d.get("crop_size",  256),
+        "backbone":    m.get("backbone",   "efficientunet"),
+        "roi_ckpt":    m.get("roi_ckpt",   ""),
+        "proj_ckpt":   m.get("proj_ckpt",  ""),
+        "threshold":   e.get("threshold",  0.5),
+        "device":      e.get("device",     None),
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description='Visualise ProGIS iterative inference on BCSS patches.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument('--roi_ckpt',    required=True,
+    p.add_argument('--config',      default=None,
+                   help='Path to a YAML config file. Individual flags override YAML values.')
+    # Required unless provided via config
+    p.add_argument('--roi_ckpt',    default=None,
                    help='Path to segment_part .pth checkpoint.')
-    p.add_argument('--patches_dir', required=True,
+    p.add_argument('--patches_dir', default=None,
                    help='Path to data/patches/ root.')
-    p.add_argument('--splits_json', required=True,
+    p.add_argument('--splits_json', default=None,
                    help='Path to fold_splits.json.')
-    p.add_argument('--backbone',    default='efficientunet',
+    # Optional overrides
+    p.add_argument('--backbone',    default=None,
                    choices=['efficientunet', 'simclr'])
-    p.add_argument('--proj_ckpt',   default='',
+    p.add_argument('--proj_ckpt',   default=None,
                    help='SimCLR projection head checkpoint (simclr only).')
-    p.add_argument('--fold',        type=int, default=1)
+    p.add_argument('--fold',        type=int, default=None)
+    p.add_argument('--device',      default=None,
+                   help='Torch device, e.g. cpu, cuda, cuda:1.')
+    p.add_argument('--crop_size',   type=int, default=None,
+                   help='ROI crop size for segment_part.')
+    p.add_argument('--threshold',   type=float, default=None,
+                   help='Prototype similarity threshold.')
+    # Visualisation-specific (no YAML equivalent)
     p.add_argument('--split',       default='val', choices=['train', 'val'])
     p.add_argument('--n_samples',   type=int, default=2,
                    help='Number of multi-class patches to visualise.')
@@ -436,10 +475,6 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='Minimum number of tissue classes per patch.')
     p.add_argument('--n_iters',     type=int, default=20,
                    help='Number of correction iterations.')
-    p.add_argument('--crop_size',   type=int, default=256,
-                   help='ROI crop size for segment_part.')
-    p.add_argument('--threshold',   type=float, default=0.5,
-                   help='Prototype similarity threshold.')
     p.add_argument('--snap_iters',  type=int, nargs='+',
                    default=[0, 1, 5, 10, 20],
                    help='Iteration indices to show in grid (0 = prototype init).')
@@ -447,32 +482,56 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='Output directory for PNG/GIF files.')
     p.add_argument('--animate',     action='store_true',
                    help='Also save a GIF animation.')
-    p.add_argument('--device',      default=None,
-                   help='Torch device (auto-detected if omitted).')
     return p
 
 
 def main() -> None:
     args = _build_parser().parse_args()
+    defaults = _cfg_from_yaml(args.config) if args.config else {}
 
-    device = args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    def get(key, cast=None, fallback=None):
+        cli_val = getattr(args, key, None)
+        val = cli_val if cli_val is not None else defaults.get(key, fallback)
+        return cast(val) if (cast and val is not None) else val
+
+    patches_dir = get("patches_dir")
+    splits_json = get("splits_json")
+    roi_ckpt    = get("roi_ckpt", str, "")
+
+    if not patches_dir or not splits_json:
+        _build_parser().error(
+            "--patches_dir and --splits_json are required "
+            "(pass them directly or via --config)."
+        )
+    if not roi_ckpt:
+        _build_parser().error(
+            "--roi_ckpt is required (pass directly or set model.roi_ckpt in the YAML)."
+        )
+
+    device = get("device") or ('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
     # ── Load model ────────────────────────────────────────────────────────────
+    backbone    = get("backbone", str, "efficientunet")
+    proj_ckpt   = get("proj_ckpt", str, "")
+    crop_size   = get("crop_size", int, 256)
+    threshold   = get("threshold", float, 0.5)
+    fold        = get("fold", int, 1)
+
     backbone_kwargs = {}
-    if args.backbone == 'simclr' and args.proj_ckpt:
-        backbone_kwargs['proj_ckpt'] = args.proj_ckpt
+    if backbone == 'simclr' and proj_ckpt:
+        backbone_kwargs['proj_ckpt'] = proj_ckpt
 
     model = ProGISModel.from_checkpoint(
-        backbone_name   = args.backbone,
-        roi_ckpt        = args.roi_ckpt,
+        backbone_name   = backbone,
+        roi_ckpt        = roi_ckpt,
         backbone_kwargs = backbone_kwargs,
     ).to(device)
 
     # ── Find multi-class patches ──────────────────────────────────────────────
-    fold_splits = load_fold_splits(args.splits_json)
+    fold_splits = load_fold_splits(splits_json)
     patches = find_multiclass_patches(
-        args.patches_dir, fold_splits, args.fold, args.split,
+        patches_dir, fold_splits, fold, args.split,
         min_classes=args.min_classes, n=args.n_samples,
     )
     if not patches:
@@ -491,24 +550,26 @@ def main() -> None:
         print(f"\n[{sample_i+1}/{len(patches)}] {fname}")
         print(f"  Classes: {available_classes}")
 
-        image_raw, _, _ = load_patch_data(args.patches_dir, fname, available_classes[0])
-        image_np = to_display(image_raw)   # [H, W, 3] in [0, 1]
+        image_raw, _, _ = load_patch_data(patches_dir, fname, available_classes[0])
+        image_np = to_display(image_raw)   # [H, W, 3] in [0, 1]  — display only
+        # Model expects the same range as RoISegDataset (raw .npy, typically [0, 255])
+        image_t_base = torch.tensor(image_raw.transpose(2, 0, 1), dtype=torch.float32)
 
         gt_per_class:           dict[str, np.ndarray]        = {}
         all_masks_per_class:    dict[str, list[np.ndarray]]  = {}
         all_signals_per_class:  dict[str, list[np.ndarray]]  = {}
 
         for cls in tqdm(available_classes, desc='  Classes', leave=False):
-            _, mask_np, signal_np = load_patch_data(args.patches_dir, fname, cls)
+            _, mask_np, signal_np = load_patch_data(patches_dir, fname, cls)
 
-            image_t  = torch.tensor(image_np.transpose(2, 0, 1), dtype=torch.float32)
+            image_t  = image_t_base
             mask_t   = torch.tensor(mask_np,   dtype=torch.float32).unsqueeze(0)
             signal_t = torch.tensor(signal_np, dtype=torch.float32)
 
             all_masks, all_sigs = run_inference(
                 model, image_t, mask_t, signal_t, device,
-                n_iters=args.n_iters, crop_size=args.crop_size,
-                threshold=args.threshold,
+                n_iters=args.n_iters, crop_size=crop_size,
+                threshold=threshold,
             )
 
             gt_per_class[cls]          = mask_np
