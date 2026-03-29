@@ -172,14 +172,6 @@ class ProGISModel(nn.Module):
 
         roi_mask = (roi_seg > self.seg_threshold).float()            # binary at 0.95
 
-        # DBG: check if roi_mask is empty after thresholding
-        for b in range(B):
-            fg_px = roi_mask[b].sum().item()
-            seg_max = roi_seg[b].max().item()
-            seg_mean = roi_seg[b].mean().item()
-            print(f"[DBG forward_prototype] b={b} roi_seg max={seg_max:.3f} mean={seg_mean:.3f} "
-                  f"roi_mask fg_px={int(fg_px)} (seg_threshold={self.seg_threshold})")
-
         # ── 2. Backbone feature extraction ───────────────────────────────────
         if self.backbone is None:
             raise RuntimeError(
@@ -229,26 +221,131 @@ class ProGISModel(nn.Module):
 
         proto_mask = (sim_norm > threshold).float()
 
-        # DBG: check prototype vector and similarity map
-        for b in range(B):
-            proto_norm_b = proto_norm[b]
-            has_nan = torch.isnan(proto_norm_b).any().item()
-            proto_mag = prototype[b].norm().item()
-            sim_b = sim[b, 0]
-            sim_norm_b = sim_norm[b, 0]
-            pm_fg = proto_mask[b, 0].sum().item()
-            print(f"[DBG similarity] b={b} "
-                  f"prototype norm={proto_mag:.4f} has_nan={has_nan} "
-                  f"sim raw=[{sim_b.min():.3f},{sim_b.max():.3f}] "
-                  f"sim_norm=[{sim_norm_b.min():.3f},{sim_norm_b.max():.3f}] "
-                  f"threshold={threshold} proto_mask fg_px={int(pm_fg)}")
-
         return PrototypeOutput(
             prototype_mask = proto_mask,
             roi_mask       = roi_mask,
             similarity_map = sim_norm,
             features       = features,
         )
+
+    def forward_prototype_multiclass(
+        self,
+        roi_inputs:  list[torch.Tensor],   # n_cls × [B, 3, crop, crop]
+        roi_signals: list[torch.Tensor],   # n_cls × [B, 2, crop, crop]
+        full_image:  torch.Tensor,         # [B, 3, H, W]
+        mask_boxes:  list[torch.Tensor],   # n_cls × [B, 1, H, W]
+        threshold:   float = 0.5,
+    ) -> list[PrototypeOutput]:
+        """
+        Multi-class prototype navigation without pixel-level class overlap.
+
+        Runs the prototype initialisation for all classes simultaneously,
+        then resolves conflicts via argmax: each pixel is assigned to the
+        class with the highest normalised similarity, but only if that
+        similarity exceeds `threshold`. If no class exceeds the threshold
+        the pixel is background in all classes.
+
+        The backbone is called **once** and its features are shared across
+        all classes — more efficient than calling forward_prototype() N times.
+
+        Args:
+            roi_inputs:  list of [B, 3, crop, crop] — per-class ROI crops.
+            roi_signals: list of [B, 2, crop, crop] — per-class guiding signals.
+            full_image:  [B, 3, H, W] — full-resolution image (shared).
+            mask_boxes:  list of [B, 1, H, W] — per-class ROI box masks.
+            threshold:   cosine-similarity threshold for binarisation.
+
+        Returns:
+            List of PrototypeOutput, one per class, with non-overlapping masks.
+        """
+        if self.backbone is None:
+            raise RuntimeError(
+                "forward_prototype_multiclass() requires a backbone."
+            )
+
+        n_cls  = len(roi_inputs)
+        B      = full_image.shape[0]
+        device = full_image.device
+        crop   = self.roi_crop_size
+
+        # ── 1. Shared backbone feature extraction (called once) ───────────────
+        features = self.backbone(full_image)                         # [B, C, H, W]
+        C = features.shape[1]
+        feat_norm = F.normalize(features, dim=1)                     # [B, C, H, W]
+
+        # ── 2-5. Per-class: roi_mask → prototype → similarity map ─────────────
+        roi_masks:   list[torch.Tensor] = []
+        sim_norms:   list[torch.Tensor] = []   # raw sim_norm per class
+
+        for k in range(n_cls):
+            roi_input  = roi_inputs[k]
+            roi_signal = roi_signals[k]
+            mask_box   = mask_boxes[k]
+
+            # Step 1: initial ROI segmentation
+            zero_prev = torch.zeros(B, 1, *roi_input.shape[2:], device=device)
+            roi_seg   = self.segment(roi_input, zero_prev, roi_signal)
+            roi_mask  = (roi_seg > self.seg_threshold).float()
+
+            # Step 3: crop features around ROI box centre
+            box = mask_box.squeeze(1)                                # [B, H, W]
+            x_cropped = features * box.unsqueeze(1)                  # [B, C, H, W]
+
+            cropped_regions: list[torch.Tensor] = []
+            for i in range(B):
+                feat = x_cropped[i]
+                nz   = torch.nonzero(box[i], as_tuple=True)
+                if len(nz[0]) > 0:
+                    cy = int(((nz[0].min() + nz[0].max()) // 2).item())
+                    cx = int(((nz[1].min() + nz[1].max()) // 2).item())
+                    sy = min(max(cy - crop // 2, 0), feat.shape[1] - crop)
+                    sx = min(max(cx - crop // 2, 0), feat.shape[2] - crop)
+                    cropped_regions.append(feat[:, sy:sy+crop, sx:sx+crop])
+                else:
+                    cropped_regions.append(
+                        torch.zeros(C, crop, crop, dtype=features.dtype, device=device)
+                    )
+            cropped = torch.stack(cropped_regions)                   # [B, C, crop, crop]
+
+            # Step 4: prototype = mean feature at foreground pixels
+            fg_count  = roi_mask.sum(dim=(2, 3), keepdim=True).clamp(min=1)
+            prototype = (cropped * roi_mask).sum(dim=(2, 3), keepdim=True) / fg_count
+            prototype = prototype.squeeze(3).squeeze(2)              # [B, C]
+
+            # Step 5: cosine similarity map
+            proto_norm = F.normalize(prototype, dim=1)               # [B, C]
+            sim = torch.einsum("bchw,bc->bhw", feat_norm, proto_norm) ** 2
+            sim = sim.unsqueeze(1)                                   # [B, 1, H, W]
+
+            sim_min = sim.flatten(1).min(1).values.view(B, 1, 1, 1)
+            sim_max = sim.flatten(1).max(1).values.view(B, 1, 1, 1)
+            sim_norm = (sim - sim_min) / (sim_max - sim_min + 1e-6)  # [B, 1, H, W]
+
+            roi_masks.append(roi_mask)
+            sim_norms.append(sim_norm)
+
+        # ── 6. Argmax conflict resolution ─────────────────────────────────────
+        # sim_stack: [B, n_cls, H, W]
+        sim_stack = torch.cat(sim_norms, dim=1)                      # [B, n_cls, H, W]
+        best_sim, best_cls = sim_stack.max(dim=1)                    # [B, H, W] each
+
+        outputs: list[PrototypeOutput] = []
+        for k in range(n_cls):
+            # Pixel belongs to class k iff:
+            #   (a) class k has the highest similarity among all classes
+            #   (b) that similarity exceeds the threshold
+            proto_mask_k = (
+                (best_cls == k) & (best_sim > threshold)
+            ).float().unsqueeze(1)                                   # [B, 1, H, W]
+
+            outputs.append(PrototypeOutput(
+                prototype_mask = proto_mask_k,
+                roi_mask       = roi_masks[k],
+                similarity_map = sim_norms[k],
+                features       = features,
+            ))
+
+        return outputs
 
     # ── Convenience constructors ──────────────────────────────────────────────
 

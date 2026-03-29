@@ -210,6 +210,90 @@ def run_inference(
     return all_masks, all_signals
 
 
+@torch.no_grad()
+def run_inference_multiclass(
+    model:             ProGISModel,
+    image_t:           torch.Tensor,         # [3, H, W]
+    gt_masks_t:        list[torch.Tensor],   # n_cls × [1, H, W]
+    signals_t:         list[torch.Tensor],   # n_cls × [2, H, W]
+    available_classes: list[str],
+    device:            str,
+    n_iters:           int   = 20,
+    crop_size:         int   = 256,
+    threshold:         float = 0.5,
+) -> dict[str, tuple[list[np.ndarray], list[np.ndarray]]]:
+    """
+    Multi-class inference: proto navigation without pixel overlaps.
+
+    Proto step: all classes together via forward_prototype_multiclass()
+      → argmax over per-class similarity → no pixel assigned to 2+ classes.
+    Correction step: each class independently (overlap impossible by design).
+
+    Returns:
+        dict cls → (all_masks, all_signals), same format as run_inference().
+    """
+    images = image_t.unsqueeze(0).to(device)   # [1, 3, H, W]
+    n_cls  = len(available_classes)
+
+    masks_list   = [gt_masks_t[k].unsqueeze(0).to(device)  for k in range(n_cls)]
+    signals_list = [signals_t[k].unsqueeze(0).to(device)   for k in range(n_cls)]
+
+    # ── Proto step: all classes at once ───────────────────────────────────────
+    proto_crops = [
+        roi_crop_for_prototype(images, signals_list[k], masks_list[k], crop_size)
+        for k in range(n_cls)
+    ]
+    proto_outputs = model.forward_prototype_multiclass(
+        roi_inputs  = [pc.roi_images  for pc in proto_crops],
+        roi_signals = [pc.roi_signals for pc in proto_crops],
+        full_image  = images,
+        mask_boxes  = [pc.mask_box    for pc in proto_crops],
+        threshold   = threshold,
+    )
+
+    # ── Correction step: independent per class ────────────────────────────────
+    results: dict[str, tuple[list[np.ndarray], list[np.ndarray]]] = {}
+
+    for k, cls in enumerate(available_classes):
+        masks   = masks_list[k]
+        signals = signals_list[k]
+
+        current_mask = proto_outputs[k].prototype_mask.clone()   # [1, 1, H, W]
+        all_masks:   list[np.ndarray] = [current_mask.squeeze().cpu().numpy()]
+        all_signals: list[np.ndarray] = [signals.squeeze().cpu().numpy()]
+
+        error_signal, centers = process_masks(current_mask, masks)
+        union_signal = torch.bitwise_or(
+            error_signal.to(torch.uint8),
+            signals.to(torch.uint8),
+        ).float()
+
+        for _ in range(n_iters):
+            crop_batch = roi_crop_for_correction(
+                images, current_mask, union_signal, centers, crop_size,
+            )
+            crop_pred = model.segment(
+                crop_batch.roi_images,
+                crop_batch.roi_prev_masks,
+                crop_batch.roi_signals,
+            )
+            paste_crop_into_mask(current_mask, crop_pred, centers,
+                                 images.shape[2], images.shape[3], crop_size)
+
+            all_masks.append(current_mask.squeeze().cpu().numpy())
+            all_signals.append(union_signal.squeeze().cpu().numpy())
+
+            error_signal, centers = process_masks(current_mask, masks)
+            union_signal = torch.bitwise_or(
+                error_signal.to(torch.uint8),
+                union_signal.to(torch.uint8),
+            ).float()
+
+        results[cls] = (all_masks, all_signals)
+
+    return results
+
+
 # ── Overlay helpers ───────────────────────────────────────────────────────────
 
 def apply_mask_overlay(
@@ -480,8 +564,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='Iteration indices to show in grid (0 = prototype init).')
     p.add_argument('--out_dir',     default='visualizations',
                    help='Output directory for PNG/GIF files.')
-    p.add_argument('--animate',     action='store_true',
+    p.add_argument('--animate',          action='store_true',
                    help='Also save a GIF animation.')
+    p.add_argument('--multiclass_proto', action='store_true',
+                   help='Use joint multi-class prototype navigation (no pixel overlaps). '
+                        'Default: per-class independent (paper-faithful).')
     return p
 
 
@@ -559,22 +646,38 @@ def main() -> None:
         all_masks_per_class:    dict[str, list[np.ndarray]]  = {}
         all_signals_per_class:  dict[str, list[np.ndarray]]  = {}
 
-        for cls in tqdm(available_classes, desc='  Classes', leave=False):
-            _, mask_np, signal_np = load_patch_data(patches_dir, fname, cls)
+        if args.multiclass_proto and len(available_classes) > 1:
+            gt_masks_t = []
+            signals_t  = []
+            for cls in available_classes:
+                _, mask_np, signal_np = load_patch_data(patches_dir, fname, cls)
+                gt_per_class[cls] = mask_np
+                gt_masks_t.append(torch.tensor(mask_np,   dtype=torch.float32).unsqueeze(0))
+                signals_t.append( torch.tensor(signal_np, dtype=torch.float32))
 
-            image_t  = image_t_base
-            mask_t   = torch.tensor(mask_np,   dtype=torch.float32).unsqueeze(0)
-            signal_t = torch.tensor(signal_np, dtype=torch.float32)
-
-            all_masks, all_sigs = run_inference(
-                model, image_t, mask_t, signal_t, device,
-                n_iters=args.n_iters, crop_size=crop_size,
-                threshold=threshold,
+            mc_results = run_inference_multiclass(
+                model, image_t_base, gt_masks_t, signals_t, available_classes, device,
+                n_iters=args.n_iters, crop_size=crop_size, threshold=threshold,
             )
+            for cls, (all_masks, all_sigs) in mc_results.items():
+                all_masks_per_class[cls]   = all_masks
+                all_signals_per_class[cls] = all_sigs
+        else:
+            for cls in tqdm(available_classes, desc='  Classes', leave=False):
+                _, mask_np, signal_np = load_patch_data(patches_dir, fname, cls)
 
-            gt_per_class[cls]          = mask_np
-            all_masks_per_class[cls]   = all_masks
-            all_signals_per_class[cls] = all_sigs
+                mask_t   = torch.tensor(mask_np,   dtype=torch.float32).unsqueeze(0)
+                signal_t = torch.tensor(signal_np, dtype=torch.float32)
+
+                all_masks, all_sigs = run_inference(
+                    model, image_t_base, mask_t, signal_t, device,
+                    n_iters=args.n_iters, crop_size=crop_size,
+                    threshold=threshold,
+                )
+
+                gt_per_class[cls]          = mask_np
+                all_masks_per_class[cls]   = all_masks
+                all_signals_per_class[cls] = all_sigs
 
         stem = Path(fname).stem
         grid_path = out_dir / f'sample_{sample_i:02d}_{stem}_grid.png'

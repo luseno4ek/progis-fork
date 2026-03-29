@@ -299,6 +299,109 @@ def print_macro_results(
     print(f"{'MACRO':<28}{dice_vals}  {iou_vals}")
 
 
+# ── Multi-class prototype evaluation ─────────────────────────────────────────
+
+def evaluate_multiclass_proto(
+    model:          ProGISModel,
+    class_datasets: dict[str, "RoISegDataset"],
+    cfg:            "EvalConfig",
+) -> dict[str, dict]:
+    """
+    Evaluate with the multiclass prototype step (no pixel overlaps).
+
+    Proto step: forward_prototype_multiclass() — argmax over per-class
+    similarity maps assigns each pixel to at most one class.
+    Correction step: independent per class (same as standard evaluate()).
+
+    Args:
+        model:          ProGISModel in eval mode.
+        class_datasets: {cls: RoISegDataset(full_patch=True)} for every class.
+        cfg:            EvalConfig.
+
+    Returns:
+        per_class_metrics: {cls: {'dice_at_k': [...], 'miou_at_k': [...]}}
+    """
+    from collections import defaultdict
+
+    device = torch.device(cfg.device)
+    model  = model.to(device).eval()
+
+    patches_dir = Path(cfg.patches_dir)
+
+    # fname → list of classes that have it
+    fname_to_classes: dict[str, list[str]] = defaultdict(list)
+    for cls, ds in class_datasets.items():
+        for fname, _ in ds.items:
+            fname_to_classes[fname].append(cls)
+
+    n_steps = cfg.n_iter + 1
+    dice_lists: dict[str, list[list[float]]] = {
+        cls: [[] for _ in range(n_steps)] for cls in class_datasets
+    }
+    miou_lists: dict[str, list[list[float]]] = {
+        cls: [[] for _ in range(n_steps)] for cls in class_datasets
+    }
+
+    with torch.no_grad():
+        for fname, classes in tqdm(fname_to_classes.items(),
+                                   desc="Evaluating (multiclass proto)"):
+            img_npy = np.load(patches_dir / "all" / "image_npy" / fname)
+            image_t = (
+                torch.tensor(img_npy.transpose(2, 0, 1), dtype=torch.float32)
+                .unsqueeze(0).to(device)
+            )
+
+            masks_t:   list[torch.Tensor] = []
+            signals_t: list[torch.Tensor] = []
+            proto_crops = []
+
+            for cls in classes:
+                mask_npy   = np.load(patches_dir / cls / "mask_npy"            / fname)
+                signal_npy = np.load(patches_dir / cls / "signal_all_line_npy" / fname)
+                m_t = torch.tensor(mask_npy,   dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+                s_t = torch.tensor(signal_npy, dtype=torch.float32).unsqueeze(0).to(device)
+                masks_t.append(m_t)
+                signals_t.append(s_t)
+                proto_crops.append(
+                    roi_crop_for_prototype(image_t, s_t, m_t, cfg.crop_size)
+                )
+
+            proto_outputs = model.forward_prototype_multiclass(
+                roi_inputs  = [pc.roi_images  for pc in proto_crops],
+                roi_signals = [pc.roi_signals for pc in proto_crops],
+                full_image  = image_t,
+                mask_boxes  = [pc.mask_box    for pc in proto_crops],
+                threshold   = cfg.threshold,
+            )
+
+            for k, cls in enumerate(classes):
+                pred_list = iterative_correction(
+                    model       = model,
+                    images      = image_t,
+                    proto_mask  = proto_outputs[k].prototype_mask,
+                    gt_masks    = masks_t[k],
+                    init_signal = signals_t[k],
+                    n_iter      = cfg.n_iter,
+                    crop_size   = cfg.crop_size,
+                )
+                for step, pred in enumerate(pred_list):
+                    for p, m in zip(pred, masks_t[k]):
+                        d = compute_dice_binary(p, m)
+                        if not np.isnan(d):
+                            dice_lists[cls][step].append(d)
+                        iou = compute_miou_binary(p, m)
+                        if not np.isnan(iou):
+                            miou_lists[cls][step].append(iou)
+
+    return {
+        cls: {
+            "dice_at_k": [float(np.mean(v)) if v else 0.0 for v in dice_lists[cls]],
+            "miou_at_k": [float(np.mean(v)) if v else 0.0 for v in miou_lists[cls]],
+        }
+        for cls in class_datasets
+    }
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -322,6 +425,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device",     help="Torch device, e.g. 'cpu', 'cuda', 'cuda:1'.")
     p.add_argument("--batch_size", type=int)
     p.add_argument("--num_workers",type=int)
+    p.add_argument("--multiclass_proto", action="store_true",
+                   help="Use argmax over per-class similarity maps for prototype step "
+                        "(no pixel overlaps). Corrections are always independent per class.")
     return p
 
 
@@ -399,21 +505,33 @@ def main() -> None:
     )
 
     if cfg.cls == "all":
-        per_class_metrics: dict[str, dict] = {}
-        for cls in ALL_CLASSES:
-            val_dataset = RoISegDataset(
-                cfg.patches_dir, cfg.splits_json,
-                fold=cfg.fold, split="val", cls=cls, crop_size=cfg.crop_size,
-                full_patch=True,
-            )
-            if len(val_dataset) == 0:
-                print(f"[{cls}] no val samples, skipping.")
-                continue
-            val_loader = DataLoader(
-                val_dataset, batch_size=cfg.batch_size,
-                shuffle=False, num_workers=cfg.num_workers,
-            )
-            per_class_metrics[cls] = evaluate(model, val_loader, cfg)
+        if args.multiclass_proto:
+            class_datasets: dict[str, RoISegDataset] = {}
+            for cls in ALL_CLASSES:
+                ds = RoISegDataset(
+                    cfg.patches_dir, cfg.splits_json,
+                    fold=cfg.fold, split="val", cls=cls, crop_size=cfg.crop_size,
+                    full_patch=True,
+                )
+                if len(ds) > 0:
+                    class_datasets[cls] = ds
+            per_class_metrics = evaluate_multiclass_proto(model, class_datasets, cfg)
+        else:
+            per_class_metrics: dict[str, dict] = {}
+            for cls in ALL_CLASSES:
+                val_dataset = RoISegDataset(
+                    cfg.patches_dir, cfg.splits_json,
+                    fold=cfg.fold, split="val", cls=cls, crop_size=cfg.crop_size,
+                    full_patch=True,
+                )
+                if len(val_dataset) == 0:
+                    print(f"[{cls}] no val samples, skipping.")
+                    continue
+                val_loader = DataLoader(
+                    val_dataset, batch_size=cfg.batch_size,
+                    shuffle=False, num_workers=cfg.num_workers,
+                )
+                per_class_metrics[cls] = evaluate(model, val_loader, cfg)
         print_macro_results(per_class_metrics)
     else:
         val_dataset = RoISegDataset(
