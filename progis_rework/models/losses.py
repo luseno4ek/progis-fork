@@ -87,6 +87,24 @@ def compute_miou_binary(
     return compute_iou(pred, target, cls=1)
 
 
+def compute_dice_binary(
+    pred:   np.ndarray | torch.Tensor,
+    target: np.ndarray | torch.Tensor,
+) -> float:
+    """
+    Hard Dice coefficient for binary segmentation (single sample).
+
+    Both pred and target are thresholded at 0.5 before evaluation.
+    Returns float('nan') when both pred and target are empty.
+    Accepts NumPy arrays or PyTorch tensors.
+    """
+    pred   = (_to_numpy(pred)   > 0.5).astype(float)
+    target = (_to_numpy(target) > 0.5).astype(float)
+    num = 2.0 * (pred * target).sum()
+    den = pred.sum() + target.sum()
+    return float("nan") if den == 0 else float(num / den)
+
+
 # ── Torch metrics ─────────────────────────────────────────────────────────────
 
 def pixel_accuracy(

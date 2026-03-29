@@ -42,14 +42,14 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from progis_rework.data.dataset import RoISegDataset
+from progis_rework.data.dataset import RoISegDataset, ALL_CLASSES
 from progis_rework.interactive.roi import (
     roi_crop_for_prototype,
     roi_crop_for_correction,
     paste_crop_into_mask,
 )
 from progis_rework.interactive.signals import process_masks
-from progis_rework.models.losses import compute_miou_binary, dice_coeff
+from progis_rework.models.losses import compute_dice_binary, compute_miou_binary
 from progis_rework.models.progis import ProGISModel
 
 
@@ -175,9 +175,8 @@ def evaluate(model: ProGISModel, val_loader: DataLoader, cfg: EvalConfig) -> dic
     model  = model.to(device).eval()
 
     n_steps = cfg.n_iter + 1
-    dice_sums = [0.0] * n_steps
+    dice_lists: list[list[float]] = [[] for _ in range(n_steps)]
     miou_lists: list[list[float]] = [[] for _ in range(n_steps)]
-    n_samples = 0
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Evaluating"):
@@ -186,8 +185,6 @@ def evaluate(model: ProGISModel, val_loader: DataLoader, cfg: EvalConfig) -> dic
                 batch[1].to(device),
                 batch[2].to(device),
             )
-            B = images.size(0)
-            n_samples += B
 
             # ── Initial prototype crop + prediction ───────────────────────
             proto_crop = roi_crop_for_prototype(
@@ -212,37 +209,94 @@ def evaluate(model: ProGISModel, val_loader: DataLoader, cfg: EvalConfig) -> dic
                 crop_size    = cfg.crop_size,
             )
 
-            # ── Accumulate metrics at every interaction count ─────────────
+            # ── Accumulate per-sample metrics at every interaction count ──
             for k, pred in enumerate(pred_list):
-                dice_sums[k] += dice_coeff(pred, masks).item() * B
                 for p, m in zip(pred, masks):
-                    miou = compute_miou_binary(p, m)
-                    if not np.isnan(miou):
-                        miou_lists[k].append(miou)
+                    d = compute_dice_binary(p, m)
+                    if not np.isnan(d):
+                        dice_lists[k].append(d)
+                    iou = compute_miou_binary(p, m)
+                    if not np.isnan(iou):
+                        miou_lists[k].append(iou)
 
-    dice_at_k = [d / n_samples for d in dice_sums]
+    dice_at_k = [float(np.mean(v)) if v else 0.0 for v in dice_lists]
     miou_at_k = [float(np.mean(v)) if v else 0.0 for v in miou_lists]
 
     return {"dice_at_k": dice_at_k, "miou_at_k": miou_at_k}
 
 
-def print_results(metrics: dict, n_report: list[int] | None = None) -> None:
+def print_results(
+    metrics:  dict,
+    n_report: list[int] | None = None,
+    cls_name: str | None = None,
+) -> None:
     """
-    Pretty-print Dice@k and mIoU@k.
+    Pretty-print Dice@k and mIoU@k for a single class or macro average.
 
     Args:
+        metrics:  dict with 'dice_at_k' and 'miou_at_k' lists.
         n_report: interaction counts to report (default [1,5,10,15,20]).
+        cls_name: optional class label shown as header.
     """
     dice = metrics["dice_at_k"]
     miou = metrics["miou_at_k"]
     if n_report is None:
         n_report = [1, 5, 10, 15, 20]
 
-    print(f"\n{'NoI':>4}  {'Dice':>7}  {'mIoU':>7}")
-    print("─" * 24)
+    header = f"  [{cls_name}]" if cls_name else ""
+    print(f"\n{'NoI':>4}  {'Dice':>7}  {'mIoU':>7}{header}")
+    print("─" * (24 + len(header)))
     for k in n_report:
         idx = min(k, len(dice) - 1)
         print(f"@{k:2d}   {dice[idx]:.4f}   {miou[idx]:.4f}")
+
+
+def print_macro_results(
+    per_class_metrics: dict[str, dict],
+    n_report: list[int] | None = None,
+) -> None:
+    """
+    Print per-class and macro-averaged Dice@k / mIoU@k table.
+
+    Args:
+        per_class_metrics: {class_name: {'dice_at_k': [...], 'miou_at_k': [...]}}
+        n_report: interaction counts to report (default [1,5,10,15,20]).
+    """
+    if n_report is None:
+        n_report = [1, 5, 10, 15, 20]
+
+    header = f"{'Class':<28}" + "".join(f"Dice@{k:<4}" for k in n_report) \
+             + "  " + "".join(f"IoU@{k:<5}" for k in n_report)
+    print("\n" + header)
+    print("─" * len(header))
+
+    classes = list(per_class_metrics.keys())
+    for cls in classes:
+        m = per_class_metrics[cls]
+        dice_vals = "".join(
+            f"{m['dice_at_k'][min(k, len(m['dice_at_k'])-1)]:<9.4f}" for k in n_report
+        )
+        iou_vals = "".join(
+            f"{m['miou_at_k'][min(k, len(m['miou_at_k'])-1)]:<9.4f}" for k in n_report
+        )
+        print(f"{cls:<28}{dice_vals}  {iou_vals}")
+
+    # Macro row
+    print("─" * len(header))
+    n_steps = max(len(m["dice_at_k"]) for m in per_class_metrics.values())
+    macro_dice = [
+        float(np.mean([per_class_metrics[c]["dice_at_k"][min(k, len(per_class_metrics[c]["dice_at_k"])-1)]
+                       for c in classes]))
+        for k in range(n_steps)
+    ]
+    macro_iou = [
+        float(np.mean([per_class_metrics[c]["miou_at_k"][min(k, len(per_class_metrics[c]["miou_at_k"])-1)]
+                       for c in classes]))
+        for k in range(n_steps)
+    ]
+    dice_vals = "".join(f"{macro_dice[min(k, len(macro_dice)-1)]:<9.4f}" for k in n_report)
+    iou_vals  = "".join(f"{macro_iou[min(k, len(macro_iou)-1)]:<9.4f}" for k in n_report)
+    print(f"{'MACRO':<28}{dice_vals}  {iou_vals}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -344,17 +398,33 @@ def main() -> None:
         backbone_kwargs  = backbone_kwargs,
     )
 
-    val_dataset = RoISegDataset(
-        cfg.patches_dir, cfg.splits_json,
-        fold=cfg.fold, split="val", cls=cfg.cls, crop_size=cfg.crop_size,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=cfg.batch_size,
-        shuffle=False, num_workers=cfg.num_workers,
-    )
-
-    metrics = evaluate(model, val_loader, cfg)
-    print_results(metrics)
+    if cfg.cls == "all":
+        per_class_metrics: dict[str, dict] = {}
+        for cls in ALL_CLASSES:
+            val_dataset = RoISegDataset(
+                cfg.patches_dir, cfg.splits_json,
+                fold=cfg.fold, split="val", cls=cls, crop_size=cfg.crop_size,
+            )
+            if len(val_dataset) == 0:
+                print(f"[{cls}] no val samples, skipping.")
+                continue
+            val_loader = DataLoader(
+                val_dataset, batch_size=cfg.batch_size,
+                shuffle=False, num_workers=cfg.num_workers,
+            )
+            per_class_metrics[cls] = evaluate(model, val_loader, cfg)
+        print_macro_results(per_class_metrics)
+    else:
+        val_dataset = RoISegDataset(
+            cfg.patches_dir, cfg.splits_json,
+            fold=cfg.fold, split="val", cls=cfg.cls, crop_size=cfg.crop_size,
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=cfg.batch_size,
+            shuffle=False, num_workers=cfg.num_workers,
+        )
+        metrics = evaluate(model, val_loader, cfg)
+        print_results(metrics, cls_name=cfg.cls)
 
 
 if __name__ == "__main__":
