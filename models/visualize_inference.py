@@ -623,7 +623,7 @@ def main():
                         help='cuda / cpu (auto-detected if omitted)')
     args = parser.parse_args()
 
-    device = args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    device = args.device or ('cuda:1' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
     # Load model
@@ -675,12 +675,12 @@ def main():
             all_signals_per_class[cls] = all_sigs    # list of n_iters numpy [2,H,W]
 
         stem = Path(fname).stem
-        grid_path = out_dir / f'crop_cpu_sample_{sample_i:02d}_{stem}_grid.png'
+        grid_path = out_dir / f'10x_sample_{sample_i:02d}_{stem}_grid.png'
         plot_grid(image_np, gt_per_class, snapshots_per_class,
                   available_classes, snap_indices, grid_path)
 
         if args.animate:
-            anim_path = out_dir / f'crop_cpu_sample_{sample_i:02d}_{stem}_anim.gif'
+            anim_path = out_dir / f'10x_sample_{sample_i:02d}_{stem}_anim.gif'
             make_animation(image_np, all_masks_per_class, all_signals_per_class,
                            available_classes, gt_per_class, anim_path)
 

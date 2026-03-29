@@ -42,7 +42,7 @@ stage2:
   num_workers:    4
   lr:             4.0e-4
   weight_decay:   0.0
-  device:         cuda
+  device:         cuda:1
   checkpoint_dir: runs/stage2/fold1
   tensorboard:    true
 
@@ -51,11 +51,11 @@ eval:
   threshold:   0.5
   batch_size:  16
   num_workers: 4
-  device:      cuda
-  results_dir: ""
+  device:      cuda:1
+  results_dir: runs/stage2/fold1/20260323_2103/results_best
 
 api:
   host:      "0.0.0.0"
   port:      8000
-  device:    cuda
+  device:    cuda:1
   crop_size: 256
