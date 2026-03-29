@@ -16,6 +16,8 @@ process_masks_gpu(pred, gt)       → (signal [B,2,H,W], centers list)  — GPU
 
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -26,9 +28,56 @@ from skimage.measure import regionprops
 from skimage.morphology import skeletonize
 
 
+# ── Stroke-length limiter ─────────────────────────────────────────────────────
+
+def _sample_stroke_bfs(skel_np: np.ndarray, max_length: int) -> np.ndarray:
+    """
+    Return a connected sub-stroke of at most *max_length* pixels from skeleton.
+
+    Algorithm: pick a random starting pixel on the skeleton, then grow
+    outward via 8-connected BFS until *max_length* pixels are collected.
+
+    Args:
+        skel_np:    [H, W] binary ndarray (skeleton).
+        max_length: maximum number of pixels to keep.
+
+    Returns:
+        [H, W] binary ndarray with at most max_length pixels set.
+    """
+    ys, xs = np.where(skel_np)
+    if len(ys) == 0 or len(ys) <= max_length:
+        return skel_np
+
+    H, W = skel_np.shape
+    start_i = np.random.randint(len(ys))
+    start   = (int(ys[start_i]), int(xs[start_i]))
+
+    visited: set[tuple[int, int]] = {start}
+    queue   = deque([start])
+    result  = np.zeros_like(skel_np)
+
+    while queue and len(visited) < max_length:
+        cy, cx = queue.popleft()
+        result[cy, cx] = 1
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                ny, nx = cy + dy, cx + dx
+                nb = (ny, nx)
+                if 0 <= ny < H and 0 <= nx < W and nb not in visited and skel_np[ny, nx]:
+                    visited.add(nb)
+                    queue.append(nb)
+
+    return result
+
+
 # ── Per-pixel skeleton signal (torch, used by CPU process_masks) ──────────────
 
-def _generate_guiding_signal_tensor(binary_mask: torch.Tensor) -> torch.Tensor:
+def _generate_guiding_signal_tensor(
+    binary_mask:      torch.Tensor,
+    max_stroke_length: int | None = None,
+) -> torch.Tensor:
     """
     Skeleton guiding signal from a binary [H, W] tensor.
 
@@ -64,14 +113,17 @@ def _generate_guiding_signal_tensor(binary_mask: torch.Tensor) -> torch.Tensor:
         new_mask = bm.bool()
 
     skel = skeletonize(new_mask.cpu().numpy())
+    if max_stroke_length is not None:
+        skel = _sample_stroke_bfs(skel, max_stroke_length)
     return torch.tensor(skel, dtype=torch.float32, device=binary_mask.device)
 
 
 # ── CPU process_masks ─────────────────────────────────────────────────────────
 
 def process_masks(
-    pred_mask_all: torch.Tensor,
-    gt_mask_all:   torch.Tensor,
+    pred_mask_all:     torch.Tensor,
+    gt_mask_all:       torch.Tensor,
+    max_stroke_length: int | None = None,
 ) -> tuple[torch.Tensor, list]:
     """
     Compute error-region guiding signals for a batch (CPU implementation).
@@ -112,11 +164,11 @@ def process_masks(
         bg_area = bg_largest.sum().item()
 
         if fg_area >= bg_area:
-            skel = _generate_guiding_signal_tensor(fg_largest) if fg_area > 0 else torch.zeros_like(pred)
+            skel = _generate_guiding_signal_tensor(fg_largest, max_stroke_length) if fg_area > 0 else torch.zeros_like(pred)
             output[i, 0] = skel
             centers.append(fg_center)
         else:
-            skel = _generate_guiding_signal_tensor(bg_largest) if bg_area > 0 else torch.zeros_like(pred)
+            skel = _generate_guiding_signal_tensor(bg_largest, max_stroke_length) if bg_area > 0 else torch.zeros_like(pred)
             output[i, 1] = skel
             centers.append(bg_center)
 
@@ -217,9 +269,10 @@ def _edt_skeleton_gpu(mask: torch.Tensor, max_steps: int = 80) -> torch.Tensor:
 
 
 def process_masks_gpu(
-    pred_mask_all:  torch.Tensor,
-    gt_mask_all:    torch.Tensor,
-    max_edt_steps:  int = 80,
+    pred_mask_all:     torch.Tensor,
+    gt_mask_all:       torch.Tensor,
+    max_edt_steps:     int      = 80,
+    max_stroke_length: int | None = None,
 ) -> tuple[torch.Tensor, list]:
     """
     GPU drop-in replacement for process_masks. No scipy/skimage calls.
@@ -253,6 +306,19 @@ def process_masks_gpu(
 
     selected = fg * use_fg + bg * (1 - use_fg)           # [B, 1, H, W]
     skel     = _edt_skeleton_gpu(selected, max_edt_steps) # [B, 1, H, W]
+
+    if max_stroke_length is not None:
+        # Radius = half the target length (skeleton can curve, diameter ≈ length)
+        radius = max_stroke_length / 2.0
+        ys = torch.arange(H, device=device).float().view(1, 1, H, 1)
+        xs = torch.arange(W, device=device).float().view(1, 1, 1, W)
+        # Pick centroid of skeleton as crop centre (vectorised)
+        skel_n   = skel.flatten(1).sum(1).clamp(min=1)            # [B]
+        ctr_y    = (skel * ys).flatten(1).sum(1) / skel_n         # [B]
+        ctr_x    = (skel * xs).flatten(1).sum(1) / skel_n         # [B]
+        dist2    = (ys - ctr_y.view(B, 1, 1, 1)).pow(2) + \
+                   (xs - ctr_x.view(B, 1, 1, 1)).pow(2)
+        skel = skel * (dist2 <= radius ** 2).float()
 
     output = torch.zeros(B, 2, H, W, device=device)
     output[:, 0:1] = skel * use_fg

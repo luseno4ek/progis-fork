@@ -70,8 +70,9 @@ class EvalConfig:
     proj_ckpt:   str   = ""       # SimCLR only
 
     # Evaluation
-    n_iter:      int   = 20       # max correction iterations
-    threshold:   float = 0.5     # prototype similarity threshold
+    n_iter:            int        = 20    # max correction iterations
+    threshold:         float      = 0.5   # prototype similarity threshold
+    max_stroke_length: int | None = None  # None = unlimited (paper default)
 
     # Hardware
     device:      str   = "cpu"
@@ -85,13 +86,14 @@ class EvalConfig:
 # ── Core loop ─────────────────────────────────────────────────────────────────
 
 def iterative_correction(
-    model:        ProGISModel,
-    images:       torch.Tensor,   # [B, 3, H, W]
-    proto_mask:   torch.Tensor,   # [B, 1, H, W]  prototype initialisation
-    gt_masks:     torch.Tensor,   # [B, 1, H, W]
-    init_signal:  torch.Tensor,   # [B, 2, H, W]  original guiding signal
-    n_iter:       int   = 20,
-    crop_size:    int   = 256,
+    model:             ProGISModel,
+    images:            torch.Tensor,   # [B, 3, H, W]
+    proto_mask:        torch.Tensor,   # [B, 1, H, W]  prototype initialisation
+    gt_masks:          torch.Tensor,   # [B, 1, H, W]
+    init_signal:       torch.Tensor,   # [B, 2, H, W]  original guiding signal
+    n_iter:            int       = 20,
+    crop_size:         int       = 256,
+    max_stroke_length: int | None = None,
 ) -> list[torch.Tensor]:
     """
     Run the iterative correction loop.
@@ -125,7 +127,7 @@ def iterative_correction(
     pred_list    = [current_mask.clone()]
 
     # Initial error signal
-    error_signal, centers = process_masks(current_mask, gt_masks)
+    error_signal, centers = process_masks(current_mask, gt_masks, max_stroke_length)
     union_signal = torch.bitwise_or(
         error_signal.to(torch.uint8),
         init_signal.to(torch.uint8),
@@ -152,7 +154,7 @@ def iterative_correction(
         pred_list.append(current_mask.clone())
 
         # Update error signal for next iteration
-        error_signal, centers = process_masks(current_mask, gt_masks)
+        error_signal, centers = process_masks(current_mask, gt_masks, max_stroke_length)
         union_signal = torch.bitwise_or(
             error_signal.to(torch.uint8),
             union_signal.to(torch.uint8),
@@ -200,13 +202,14 @@ def evaluate(model: ProGISModel, val_loader: DataLoader, cfg: EvalConfig) -> dic
 
             # ── Iterative correction ──────────────────────────────────────
             pred_list = iterative_correction(
-                model        = model,
-                images       = images,
-                proto_mask   = proto_out.prototype_mask,
-                gt_masks     = masks,
-                init_signal  = signals,
-                n_iter       = cfg.n_iter,
-                crop_size    = cfg.crop_size,
+                model              = model,
+                images             = images,
+                proto_mask         = proto_out.prototype_mask,
+                gt_masks           = masks,
+                init_signal        = signals,
+                n_iter             = cfg.n_iter,
+                crop_size          = cfg.crop_size,
+                max_stroke_length  = cfg.max_stroke_length,
             )
 
             # ── Accumulate per-sample metrics at every interaction count ──
@@ -376,13 +379,14 @@ def evaluate_multiclass_proto(
 
             for k, cls in enumerate(classes):
                 pred_list = iterative_correction(
-                    model       = model,
-                    images      = image_t,
-                    proto_mask  = proto_outputs[k].prototype_mask,
-                    gt_masks    = masks_t[k],
-                    init_signal = signals_t[k],
-                    n_iter      = cfg.n_iter,
-                    crop_size   = cfg.crop_size,
+                    model              = model,
+                    images             = image_t,
+                    proto_mask         = proto_outputs[k].prototype_mask,
+                    gt_masks           = masks_t[k],
+                    init_signal        = signals_t[k],
+                    n_iter             = cfg.n_iter,
+                    crop_size          = cfg.crop_size,
+                    max_stroke_length  = cfg.max_stroke_length,
                 )
                 for step, pred in enumerate(pred_list):
                     for p, m in zip(pred, masks_t[k]):
@@ -425,6 +429,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device",     help="Torch device, e.g. 'cpu', 'cuda', 'cuda:1'.")
     p.add_argument("--batch_size", type=int)
     p.add_argument("--num_workers",type=int)
+    p.add_argument("--max_stroke", type=int, default=None,
+                   help="Max stroke length in pixels per correction step "
+                        "(None = unlimited, paper default). E.g. 50 for realistic user strokes.")
     p.add_argument("--multiclass_proto", action="store_true",
                    help="Use argmax over per-class similarity maps for prototype step "
                         "(no pixel overlaps). Corrections are always independent per class.")
@@ -487,9 +494,10 @@ def main() -> None:
         backbone    = get("backbone",    str,   "efficientunet"),
         roi_ckpt    = roi_ckpt,
         proj_ckpt   = get("proj_ckpt",  str,   ""),
-        n_iter      = get("n_iter",      int,   20),
-        threshold   = get("threshold",   float, 0.5),
-        device      = get("device",      str,   "cpu"),
+        n_iter             = get("n_iter",      int,   20),
+        threshold          = get("threshold",   float, 0.5),
+        max_stroke_length  = args.max_stroke,
+        device             = get("device",      str,   "cpu"),
         batch_size  = get("batch_size",  int,   16),
         num_workers = get("num_workers", int,   4),
     )

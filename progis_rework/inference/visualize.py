@@ -138,14 +138,15 @@ def to_display(image_np: np.ndarray) -> np.ndarray:
 
 @torch.no_grad()
 def run_inference(
-    model:      ProGISModel,
-    image_t:    torch.Tensor,   # [3, H, W]
-    gt_mask_t:  torch.Tensor,   # [1, H, W]
-    signal_t:   torch.Tensor,   # [2, H, W]
-    device:     str,
-    n_iters:    int = 20,
-    crop_size:  int = 256,
-    threshold:  float = 0.5,
+    model:             ProGISModel,
+    image_t:           torch.Tensor,   # [3, H, W]
+    gt_mask_t:         torch.Tensor,   # [1, H, W]
+    signal_t:          torch.Tensor,   # [2, H, W]
+    device:            str,
+    n_iters:           int       = 20,
+    crop_size:         int       = 256,
+    threshold:         float     = 0.5,
+    max_stroke_length: int | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """
     Full ProGIS inference pipeline for a single patch:
@@ -180,7 +181,7 @@ def run_inference(
     all_signals.append(signals.squeeze().cpu().numpy())
 
     # ── Steps 1..n_iters: iterative correction ────────────────────────────────
-    error_signal, centers = process_masks(current_mask, masks)
+    error_signal, centers = process_masks(current_mask, masks, max_stroke_length)
     union_signal = torch.bitwise_or(
         error_signal.to(torch.uint8),
         signals.to(torch.uint8),
@@ -201,7 +202,7 @@ def run_inference(
         all_masks.append(current_mask.squeeze().cpu().numpy())
         all_signals.append(union_signal.squeeze().cpu().numpy())
 
-        error_signal, centers = process_masks(current_mask, masks)
+        error_signal, centers = process_masks(current_mask, masks, max_stroke_length)
         union_signal = torch.bitwise_or(
             error_signal.to(torch.uint8),
             union_signal.to(torch.uint8),
@@ -218,9 +219,10 @@ def run_inference_multiclass(
     signals_t:         list[torch.Tensor],   # n_cls × [2, H, W]
     available_classes: list[str],
     device:            str,
-    n_iters:           int   = 20,
-    crop_size:         int   = 256,
-    threshold:         float = 0.5,
+    n_iters:           int       = 20,
+    crop_size:         int       = 256,
+    threshold:         float     = 0.5,
+    max_stroke_length: int | None = None,
 ) -> dict[str, tuple[list[np.ndarray], list[np.ndarray]]]:
     """
     Multi-class inference: proto navigation without pixel overlaps.
@@ -262,7 +264,7 @@ def run_inference_multiclass(
         all_masks:   list[np.ndarray] = [current_mask.squeeze().cpu().numpy()]
         all_signals: list[np.ndarray] = [signals.squeeze().cpu().numpy()]
 
-        error_signal, centers = process_masks(current_mask, masks)
+        error_signal, centers = process_masks(current_mask, masks, max_stroke_length)
         union_signal = torch.bitwise_or(
             error_signal.to(torch.uint8),
             signals.to(torch.uint8),
@@ -283,7 +285,7 @@ def run_inference_multiclass(
             all_masks.append(current_mask.squeeze().cpu().numpy())
             all_signals.append(union_signal.squeeze().cpu().numpy())
 
-            error_signal, centers = process_masks(current_mask, masks)
+            error_signal, centers = process_masks(current_mask, masks, max_stroke_length)
             union_signal = torch.bitwise_or(
                 error_signal.to(torch.uint8),
                 union_signal.to(torch.uint8),
@@ -566,6 +568,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='Output directory for PNG/GIF files.')
     p.add_argument('--animate',          action='store_true',
                    help='Also save a GIF animation.')
+    p.add_argument('--max_stroke', type=int, default=None,
+                   help='Max stroke length in pixels per correction step '
+                        '(None = unlimited). E.g. --max_stroke 50.')
     p.add_argument('--multiclass_proto', action='store_true',
                    help='Use joint multi-class prototype navigation (no pixel overlaps). '
                         'Default: per-class independent (paper-faithful).')
@@ -658,6 +663,7 @@ def main() -> None:
             mc_results = run_inference_multiclass(
                 model, image_t_base, gt_masks_t, signals_t, available_classes, device,
                 n_iters=args.n_iters, crop_size=crop_size, threshold=threshold,
+                max_stroke_length=args.max_stroke,
             )
             for cls, (all_masks, all_sigs) in mc_results.items():
                 all_masks_per_class[cls]   = all_masks
@@ -672,7 +678,7 @@ def main() -> None:
                 all_masks, all_sigs = run_inference(
                     model, image_t_base, mask_t, signal_t, device,
                     n_iters=args.n_iters, crop_size=crop_size,
-                    threshold=threshold,
+                    threshold=threshold, max_stroke_length=args.max_stroke,
                 )
 
                 gt_per_class[cls]          = mask_np
