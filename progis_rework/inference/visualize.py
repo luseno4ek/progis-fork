@@ -53,6 +53,7 @@ from progis_rework.interactive.roi import (
     roi_crop_for_correction,
     roi_crop_for_prototype,
     paste_crop_into_mask,
+    paste_crop_soft,
 )
 from progis_rework.interactive.signals import process_masks
 from progis_rework.models.progis import ProGISModel
@@ -178,7 +179,11 @@ def run_inference(
     )
     current_mask = proto_out.prototype_mask.clone()    # [1, 1, H, W]
     all_masks.append(current_mask.squeeze().cpu().numpy())
-    all_signals.append(signals.squeeze().cpu().numpy())
+    # Step 0: only fg channel — ch1 of signal_all_line_npy is a pre-computed bg
+    # skeleton from preprocessing, no bg corrections applied yet.
+    sig0 = signals.squeeze().cpu().numpy().copy()
+    sig0[1] = 0.0
+    all_signals.append(sig0)
 
     # ── Steps 1..n_iters: iterative correction ────────────────────────────────
     error_signal, centers = process_masks(current_mask, masks, max_stroke_length)
@@ -253,47 +258,73 @@ def run_inference_multiclass(
         threshold   = threshold,
     )
 
-    # ── Correction step: independent per class ────────────────────────────────
-    results: dict[str, tuple[list[np.ndarray], list[np.ndarray]]] = {}
+    # ── Correction step: joint argmax conflict resolution ─────────────────────
+    # Maintain one soft probability map per class [1, 1, H, W].
+    # After each round all classes paste their raw predictions, then argmax
+    # assigns each pixel to at most one class (or background if max < 0.5).
+    H, W = images.shape[2], images.shape[3]
 
-    for k, cls in enumerate(available_classes):
-        masks   = masks_list[k]
-        signals = signals_list[k]
+    current_probs = [proto_outputs[k].prototype_mask.float().clone() for k in range(n_cls)]
+    current_masks = [proto_outputs[k].prototype_mask.clone()         for k in range(n_cls)]
 
-        current_mask = proto_outputs[k].prototype_mask.clone()   # [1, 1, H, W]
-        all_masks:   list[np.ndarray] = [current_mask.squeeze().cpu().numpy()]
-        all_signals: list[np.ndarray] = [signals.squeeze().cpu().numpy()]
+    # Per-class history and accumulated union signal.
+    # Step 0 = prototype init: only fg channel (ch0) is shown — ch1 in the raw
+    # signal_all_line_npy file is a pre-computed bg skeleton from dataset
+    # preprocessing, but no bg corrections have been applied yet at this stage.
+    all_masks_h: list[list[np.ndarray]] = [[cm.squeeze().cpu().numpy()] for cm in current_masks]
+    all_signals_h: list[list[np.ndarray]] = []
+    for k in range(n_cls):
+        sig_np = signals_list[k].squeeze().cpu().numpy().copy()  # [2, H, W]
+        sig_np[1] = 0.0  # zero bg channel: no bg corrections at prototype init
+        all_signals_h.append([sig_np])
 
-        error_signal, centers = process_masks(current_mask, masks, max_stroke_length)
-        union_signal = torch.bitwise_or(
-            error_signal.to(torch.uint8),
-            signals.to(torch.uint8),
-        ).float()
+    union_signals: list[torch.Tensor]          = []
+    centers_list:  list[list[tuple | None]]    = []
+    for k in range(n_cls):
+        err, ctr = process_masks(current_masks[k], masks_list[k], max_stroke_length)
+        union_signals.append(
+            torch.bitwise_or(err.to(torch.uint8), signals_list[k].to(torch.uint8)).float()
+        )
+        centers_list.append(ctr)
 
-        for _ in range(n_iters):
+    for _ in range(n_iters):
+        # 1. Collect soft predictions for every class into updated prob maps
+        new_probs = [p.clone() for p in current_probs]
+
+        for k in range(n_cls):
             crop_batch = roi_crop_for_correction(
-                images, current_mask, union_signal, centers, crop_size,
+                images, current_masks[k], union_signals[k], centers_list[k], crop_size,
             )
             crop_pred = model.segment(
                 crop_batch.roi_images,
                 crop_batch.roi_prev_masks,
                 crop_batch.roi_signals,
             )
-            paste_crop_into_mask(current_mask, crop_pred, centers,
-                                 images.shape[2], images.shape[3], crop_size)
+            paste_crop_soft(new_probs[k], crop_pred, centers_list[k], H, W, crop_size)
 
-            all_masks.append(current_mask.squeeze().cpu().numpy())
-            all_signals.append(union_signal.squeeze().cpu().numpy())
+        # 2. Argmax conflict resolution: each pixel → at most one class
+        prob_stack = torch.cat(new_probs, dim=1)          # [1, n_cls, H, W]
+        best_prob, best_cls_map = prob_stack.max(dim=1, keepdim=True)  # [1, 1, H, W]
 
-            error_signal, centers = process_masks(current_mask, masks, max_stroke_length)
-            union_signal = torch.bitwise_or(
-                error_signal.to(torch.uint8),
-                union_signal.to(torch.uint8),
+        current_probs = new_probs
+        for k in range(n_cls):
+            current_masks[k] = ((best_cls_map == k) & (best_prob > 0.5)).float()
+
+        # 3. Record masks + update union signals
+        for k in range(n_cls):
+            all_masks_h[k].append(current_masks[k].squeeze().cpu().numpy())
+            all_signals_h[k].append(union_signals[k].squeeze().cpu().numpy())
+
+            err, ctr = process_masks(current_masks[k], masks_list[k], max_stroke_length)
+            union_signals[k] = torch.bitwise_or(
+                err.to(torch.uint8), union_signals[k].to(torch.uint8),
             ).float()
+            centers_list[k] = ctr
 
-        results[cls] = (all_masks, all_signals)
-
-    return results
+    return {
+        cls: (all_masks_h[k], all_signals_h[k])
+        for k, cls in enumerate(available_classes)
+    }
 
 
 # ── Overlay helpers ───────────────────────────────────────────────────────────

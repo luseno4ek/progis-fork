@@ -47,6 +47,7 @@ from progis_rework.interactive.roi import (
     roi_crop_for_prototype,
     roi_crop_for_correction,
     paste_crop_into_mask,
+    paste_crop_soft,
 )
 from progis_rework.interactive.signals import process_masks
 from progis_rework.models.losses import compute_dice_binary, compute_miou_binary
@@ -377,25 +378,71 @@ def evaluate_multiclass_proto(
                 threshold   = cfg.threshold,
             )
 
+            n_cls = len(classes)
+            H, W  = image_t.shape[2], image_t.shape[3]
+
+            # Init soft prob maps and binary masks from proto (already conflict-free)
+            current_probs = [proto_outputs[k].prototype_mask.float().clone() for k in range(n_cls)]
+            current_masks = [proto_outputs[k].prototype_mask.clone()         for k in range(n_cls)]
+
+            # Record proto step metrics (step 0)
             for k, cls in enumerate(classes):
-                pred_list = iterative_correction(
-                    model              = model,
-                    images             = image_t,
-                    proto_mask         = proto_outputs[k].prototype_mask,
-                    gt_masks           = masks_t[k],
-                    init_signal        = signals_t[k],
-                    n_iter             = cfg.n_iter,
-                    crop_size          = cfg.crop_size,
-                    max_stroke_length  = cfg.max_stroke_length,
+                for p, m in zip(current_masks[k], masks_t[k]):
+                    d = compute_dice_binary(p, m)
+                    if not np.isnan(d):
+                        dice_lists[cls][0].append(d)
+                    iou = compute_miou_binary(p, m)
+                    if not np.isnan(iou):
+                        miou_lists[cls][0].append(iou)
+
+            # Init union signals and error centroids
+            union_signals: list[torch.Tensor]       = []
+            centers_list:  list[list[tuple | None]] = []
+            for k in range(n_cls):
+                err, ctr = process_masks(current_masks[k], masks_t[k], cfg.max_stroke_length)
+                union_signals.append(
+                    torch.bitwise_or(err.to(torch.uint8), signals_t[k].to(torch.uint8)).float()
                 )
-                for step, pred in enumerate(pred_list):
-                    for p, m in zip(pred, masks_t[k]):
+                centers_list.append(ctr)
+
+            # Joint correction loop: soft paste → argmax → binary masks
+            for step in range(1, cfg.n_iter + 1):
+                new_probs = [p.clone() for p in current_probs]
+
+                for k in range(n_cls):
+                    crop_batch = roi_crop_for_correction(
+                        image_t, current_masks[k], union_signals[k], centers_list[k], cfg.crop_size,
+                    )
+                    crop_pred = model.segment(
+                        crop_batch.roi_images,
+                        crop_batch.roi_prev_masks,
+                        crop_batch.roi_signals,
+                    )
+                    paste_crop_soft(new_probs[k], crop_pred, centers_list[k], H, W, cfg.crop_size)
+
+                # Argmax: each pixel → at most one class
+                prob_stack = torch.cat(new_probs, dim=1)               # [1, n_cls, H, W]
+                best_prob, best_cls_map = prob_stack.max(dim=1, keepdim=True)
+
+                current_probs = new_probs
+                for k in range(n_cls):
+                    current_masks[k] = ((best_cls_map == k) & (best_prob > 0.5)).float()
+
+                # Record metrics + update signals
+                for k, cls in enumerate(classes):
+                    for p, m in zip(current_masks[k], masks_t[k]):
                         d = compute_dice_binary(p, m)
                         if not np.isnan(d):
                             dice_lists[cls][step].append(d)
                         iou = compute_miou_binary(p, m)
                         if not np.isnan(iou):
                             miou_lists[cls][step].append(iou)
+
+                    err, ctr = process_masks(current_masks[k], masks_t[k], cfg.max_stroke_length)
+                    union_signals[k] = torch.bitwise_or(
+                        err.to(torch.uint8), union_signals[k].to(torch.uint8),
+                    ).float()
+                    centers_list[k] = ctr
 
     return {
         cls: {

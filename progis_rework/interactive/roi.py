@@ -230,3 +230,39 @@ def paste_crop_into_mask(
         full_mask[b, :, sy:ey, sx:ex] = bin_pred[b]
 
     return full_mask
+
+
+def paste_crop_soft(
+    full_prob:  torch.Tensor,              # [B, 1, H, W]  modified in-place
+    crop_pred:  torch.Tensor,              # [B, 1, crop, crop]  raw sigmoid
+    centers:    list[tuple[int,int] | None],
+    H: int, W: int,
+    crop_size:  int = 256,
+) -> torch.Tensor:
+    """
+    Paste raw (un-thresholded) crop prediction into the full probability map.
+
+    Used for multi-class conflict resolution: collect soft probabilities from
+    all classes before applying argmax, so each pixel is assigned to at most
+    one class per correction round.
+
+    Args:
+        full_prob:  [B, 1, H, W] — soft probability map, updated in-place.
+        crop_pred:  [B, 1, crop, crop] — segment() output (sigmoid, [0, 1]).
+        centers:    list of (cy, cx) from roi_crop_for_correction.
+        H, W:       full image dimensions.
+        crop_size:  ROI window size (default 256).
+
+    Returns:
+        full_prob (same tensor, updated in-place).
+    """
+    B    = full_prob.shape[0]
+    crop = crop_size
+
+    for b in range(B):
+        center = centers[b] if centers[b] is not None else (H // 2, W // 2)
+        cy, cx = int(center[0]), int(center[1])
+        sy, sx, ey, ex = _crop_window(cy, cx, H, W, crop)
+        full_prob[b, :, sy:ey, sx:ex] = crop_pred[b].detach()
+
+    return full_prob
