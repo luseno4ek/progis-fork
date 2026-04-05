@@ -22,7 +22,7 @@ data:
   images_dir:   data/BCSS/images
   masks_dir:    data/BCSS/masks
 
-  # Pre-processed patches root (produced by BCSSDataProcessor)
+  # Pre-processed patches root (produced by ProGISDataProcessor)
   processed_dir: data/processed
   patches_dir:   data/patches
 

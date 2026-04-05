@@ -48,7 +48,7 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.ndimage import binary_dilation
 from tqdm import tqdm
 
-from progis_rework.data.dataset import ALL_CLASSES, get_wsi_stem, load_fold_splits
+from progis_rework.data.dataset import get_wsi_stem, load_fold_splits
 from progis_rework.interactive.roi import (
     roi_crop_for_correction,
     roi_crop_for_prototype,
@@ -67,6 +67,13 @@ CLASS_COLORS = {
     'inflammatory_infiltration': np.array([0.20, 0.72, 0.20]),   # green
     'necrosis':                  np.array([0.90, 0.72, 0.00]),   # yellow
     'others':                    np.array([0.60, 0.20, 0.80]),   # purple
+    # LumenStone S1
+    'chalcopyrite': np.array([1.00, 0.65, 0.00]),
+    'galena':       np.array([0.60, 0.80, 0.20]),
+    'bornite':      np.array([0.00, 0.75, 1.00]),
+    'pyrite':       np.array([0.18, 0.31, 0.31]),
+    'sphalerite':   np.array([0.93, 0.51, 0.93]),
+    'tenantite':    np.array([0.28, 0.24, 0.55]),
 }
 CLASS_SHORT = {
     'tumor':                     'tumor',
@@ -76,7 +83,16 @@ CLASS_SHORT = {
     'others':                    'others',
 }
 # Higher priority → drawn last (overwrites lower in combined overlay)
-CLASS_PRIORITY = ['stroma', 'others', 'inflammatory_infiltration', 'necrosis', 'tumor']
+CLASS_PRIORITY = ['stroma', 'others', 'inflammatory_infiltration', 'necrosis', 'tumor',
+                  'galena', 'bornite', 'pyrite', 'sphalerite', 'tenantite', 'chalcopyrite']
+
+
+def _get_color(cls: str) -> np.ndarray:
+    """Return color for a class, generating a deterministic fallback if unknown."""
+    if cls in CLASS_COLORS:
+        return CLASS_COLORS[cls]
+    rng = np.random.RandomState(abs(hash(cls)) % (2**31))
+    return rng.uniform(0.3, 0.9, size=3)
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -97,7 +113,9 @@ def find_multiclass_patches(
     patches_dir = Path(patches_dir)
     fname_to_classes: dict = defaultdict(list)
 
-    for cls in ALL_CLASSES:
+    available = [d.name for d in patches_dir.iterdir()
+                 if d.is_dir() and d.name != 'all' and (d / 'mask_npy').exists()]
+    for cls in sorted(available):
         mask_dir = patches_dir / cls / 'mask_npy'
         if not mask_dir.exists():
             continue
@@ -354,11 +372,12 @@ def combined_overlay(
 ) -> np.ndarray:
     """Multi-class overlay in CLASS_PRIORITY order (tumour wins over stroma)."""
     out = img.copy()
-    for cls in CLASS_PRIORITY:
+    all_cls = list(CLASS_PRIORITY) + [c for c in masks_per_class if c not in CLASS_PRIORITY]
+    for cls in all_cls:
         mask = masks_per_class.get(cls)
         if mask is None:
             continue
-        color = CLASS_COLORS[cls]
+        color = _get_color(cls)
         where = mask > 0.5
         for c in range(3):
             out[:, :, c] = np.where(
@@ -380,11 +399,12 @@ def scribble_overlay(
     """
     struct = np.ones((2 * radius + 1, 2 * radius + 1), dtype=bool)
     out = img.copy()
-    for cls in CLASS_PRIORITY:
+    all_cls = list(CLASS_PRIORITY) + [c for c in signals_per_class if c not in CLASS_PRIORITY]
+    for cls in all_cls:
         sig = signals_per_class.get(cls)
         if sig is None:
             continue
-        color = CLASS_COLORS[cls]
+        color = _get_color(cls)
         fg_px = binary_dilation(sig[0] > 0, structure=struct)
         bg_px = binary_dilation(sig[1] > 0, structure=struct)
         for c in range(3):
@@ -422,7 +442,7 @@ def plot_grid(
     ax_orig.set_title('Original patch (512×512)', fontsize=10, fontweight='bold')
     ax_orig.axis('off')
     handles = [
-        mpatches.Patch(color=CLASS_COLORS[cls], label=CLASS_SHORT.get(cls, cls))
+        mpatches.Patch(color=_get_color(cls), label=CLASS_SHORT.get(cls, cls))
         for cls in available_classes
     ]
     ax_orig.legend(handles=handles, loc='lower right', fontsize=8,
@@ -455,7 +475,7 @@ def plot_grid(
             ax = fig.add_subplot(n_rows, n_cols, base_row * n_cols + 2 + col_i)
             mask = masks_dict.get(cls)
             if mask is not None:
-                ax.imshow(apply_mask_overlay(image_np, mask, CLASS_COLORS[cls]))
+                ax.imshow(apply_mask_overlay(image_np, mask, _get_color(cls)))
             else:
                 ax.imshow(image_np)
                 ax.text(0.5, 0.5, 'N/A', ha='center', va='center',
@@ -518,7 +538,7 @@ def make_animation(
     ttl = fig.suptitle('Prototype init', fontsize=12)
 
     handles = [
-        mpatches.Patch(color=CLASS_COLORS[cls], label=CLASS_SHORT.get(cls, cls))
+        mpatches.Patch(color=_get_color(cls), label=CLASS_SHORT.get(cls, cls))
         for cls in available_classes
     ]
     fig.legend(handles=handles, loc='lower center', ncol=len(available_classes),

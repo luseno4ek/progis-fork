@@ -57,6 +57,7 @@ dataset/
 datasets/
 BCSS/
 Gastric/
+lumenstone_local/
 */image_npy/
 */mask_npy/
 */signal_*/

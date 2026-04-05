@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ProGIS — LumenStone S1, local CPU test (1 image, macOS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+data:
+  images_dir:    lumenstone_local/S1_v2_x05/imgs/train
+  masks_dir:     lumenstone_local/S1_v2_x05/masks/train
+  processed_dir: lumenstone_local/processed
+  patches_dir:   lumenstone_local/patches
+  splits_json:   lumenstone_local/patches/fold_splits.json
+  fold:          1
+  n_folds:       5
+  cls:           chalcopyrite   # single class for quick local test
+  crop_size:     256
+  patch_size:    512
+  stride:        256
+  min_fg_ratio:  0.05
+  label_map:
+    chalcopyrite: [1]
+    galena:       [2]
+    bornite:      [4]
+    pyrite:       [6]
+    sphalerite:   [8]
+    tenantite:    [11]
+
+model:
+  backbone:  efficientunet
+  roi_ckpt:  ""
+  proj_ckpt: ""
+
+stage2:
+  epochs:         2
+  batch_size:     2
+  num_workers:    0
+  lr:             4.0e-4
+  weight_decay:   5.0e-5
+  device:         cpu
+  checkpoint_dir: runs/lumenstone_local
+  tensorboard:    false
+
+eval:
+  n_iter:      3
+  threshold:   0.5
+  batch_size:  2
+  num_workers: 0
+  device:      cpu
+  results_dir: ""

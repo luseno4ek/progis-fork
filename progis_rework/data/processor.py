@@ -1,5 +1,5 @@
 """
-BCSSDataProcessor — unified data preparation pipeline.
+ProGISDataProcessor — unified data preparation pipeline.
 
 Replaces three separate scripts:
   - convert_bcss_to_npy.py   (Step 1: PNG WSI → NPY)
@@ -39,7 +39,7 @@ CLI usage
 Domain customisation
 --------------------
 Pass a custom label_map dict to override BCSS defaults:
-  processor = BCSSDataProcessor(
+  processor = ProGISDataProcessor(
       ...,
       label_map={'rock': [1,2], 'mineral': [3], 'background': [4,5]},
   )
@@ -132,9 +132,9 @@ def _sliding_window_coords(h: int, w: int, patch_size: int, stride: int) -> list
 
 # ── Main class ────────────────────────────────────────────────────────────────
 
-class BCSSDataProcessor:
+class ProGISDataProcessor:
     """
-    Two-step data preparation pipeline for BCSS (or compatible) datasets.
+    Two-step data preparation pipeline for ProGIS training.
 
     Args:
         processed_dir:  path where step-1 NPY outputs are written.
@@ -195,9 +195,12 @@ class BCSSDataProcessor:
         images_dir = Path(images_dir)
         masks_dir  = Path(masks_dir)
 
-        image_files = sorted(images_dir.glob("*.png"))
+        image_files = sorted(
+            f for ext in ("*.png", "*.jpg", "*.jpeg", "*.tif", "*.tiff")
+            for f in images_dir.glob(ext)
+        )
         if not image_files:
-            raise FileNotFoundError(f"No PNG files found in {images_dir}")
+            raise FileNotFoundError(f"No image files found in {images_dir}")
 
         self._print_header(
             f"Step 1: PNG → NPY  |  {self.n_folds}-fold CV  |  {len(self.classes)} classes",
@@ -232,8 +235,10 @@ class BCSSDataProcessor:
                 print(f"  [warn] failed to load image {img_file.name}: {exc}")
                 continue
 
-            # Load multiclass mask
-            mask_file = masks_dir / img_file.name
+            # Load multiclass mask (always look for PNG first, then same extension)
+            mask_file = masks_dir / (img_file.stem + ".png")
+            if not mask_file.exists():
+                mask_file = masks_dir / img_file.name
             if not mask_file.exists():
                 print(f"  [warn] mask not found for {img_file.name}, skipping")
                 continue
@@ -411,14 +416,18 @@ def _build_parser():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="BCSSDataProcessor: prepare data for ProGIS training.",
+        description="ProGISDataProcessor: prepare data for ProGIS training.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    parser.add_argument("--config", default=None,
+                       help="Path to a YAML config file (reads data.* section). "
+                            "Individual flags below override YAML values.")
+
     # ── shared args factory ──────────────────────────────────────────────
     def _add_common(p):
-        p.add_argument("--processed_dir", default="data/processed",
+        p.add_argument("--processed_dir", default=None,
                        help="Directory for step-1 NPY outputs.")
         p.add_argument("--patches_dir",   default="data/patches",
                        help="Directory for step-2 patch outputs.")
@@ -431,8 +440,8 @@ def _build_parser():
 
     # ── convert ──────────────────────────────────────────────────────────
     p_convert = sub.add_parser("convert", help="Step 1: PNG → NPY")
-    p_convert.add_argument("--images_dir", required=True)
-    p_convert.add_argument("--masks_dir",  required=True)
+    p_convert.add_argument("--images_dir", default=None)
+    p_convert.add_argument("--masks_dir",  default=None)
     _add_common(p_convert)
 
     # ── patch ────────────────────────────────────────────────────────────
@@ -441,32 +450,61 @@ def _build_parser():
 
     # ── all ──────────────────────────────────────────────────────────────
     p_all = sub.add_parser("all", help="Full pipeline: PNG → NPY → patches")
-    p_all.add_argument("--images_dir", required=True)
-    p_all.add_argument("--masks_dir",  required=True)
+    p_all.add_argument("--images_dir", default=None)
+    p_all.add_argument("--masks_dir",  default=None)
     _add_common(p_all)
 
     return parser
 
 
+def _cfg_from_yaml(path: str) -> dict:
+    import yaml
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    d = raw.get("data", {})
+    return {
+        "images_dir":    d.get("images_dir"),
+        "masks_dir":     d.get("masks_dir"),
+        "processed_dir": d.get("processed_dir"),
+        "patches_dir":   d.get("patches_dir"),
+        "n_folds":       d.get("n_folds",       5),
+        "patch_size":    d.get("patch_size",    512),
+        "stride":        d.get("stride",        256),
+        "min_fg_ratio":  d.get("min_fg_ratio",  0.05),
+        "label_map":     d.get("label_map"),     # dict str→list[int] or None
+    }
+
+
 def main() -> None:
     args = _build_parser().parse_args()
 
-    processor = BCSSDataProcessor(
-        processed_dir = args.processed_dir,
-        patches_dir   = args.patches_dir,
-        n_folds       = args.n_folds,
-        patch_size    = args.patch_size,
-        stride        = args.stride,
-        min_fg_ratio  = args.min_fg_ratio,
-        resize        = not args.no_resize,
+    # YAML provides defaults; CLI flags override
+    cfg = _cfg_from_yaml(args.config) if hasattr(args, "config") and args.config else {}
+
+    def get(key, fallback=None):
+        cli_val = getattr(args, key, None)
+        return cli_val if cli_val is not None else cfg.get(key, fallback)
+
+    processor = ProGISDataProcessor(
+        processed_dir = get("processed_dir", "data/processed"),
+        patches_dir   = get("patches_dir",   "data/patches"),
+        label_map     = get("label_map"),     # None → BCSS defaults
+        n_folds       = get("n_folds",       5),
+        patch_size    = get("patch_size",    512),
+        stride        = get("stride",        256),
+        min_fg_ratio  = get("min_fg_ratio",  0.05),
+        resize        = not getattr(args, "no_resize", False),
     )
 
+    images_dir = get("images_dir")
+    masks_dir  = get("masks_dir")
+
     if args.command == "convert":
-        processor.convert_wsi_to_npy(args.images_dir, args.masks_dir)
+        processor.convert_wsi_to_npy(images_dir, masks_dir)
     elif args.command == "patch":
         processor.create_patches()
     elif args.command == "all":
-        processor.run_pipeline(args.images_dir, args.masks_dir)
+        processor.run_pipeline(images_dir, masks_dir)
 
 
 if __name__ == "__main__":

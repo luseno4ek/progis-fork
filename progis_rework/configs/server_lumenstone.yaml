@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ProGIS — LumenStone S1, server configuration (CUDA)
+#
+# Prerequisites — prepare patches on the server:
+#   python -m progis_rework.data.processor all \
+#       --config progis_rework/configs/server_lumenstone.yaml
+#
+# Stage 2 training (50 epochs):
+#   python -m progis_rework.training.train_stage2 \
+#       --config progis_rework/configs/server_lumenstone.yaml
+#
+# With per-run overrides:
+#   python -m progis_rework.training.train_stage2 \
+#       --config progis_rework/configs/server_lumenstone.yaml \
+#       --fold 2 --device cuda:1
+#
+# Evaluation (NoI metric, n_iter=20):
+#   python -m progis_rework.inference.evaluate \
+#       --config progis_rework/configs/server_lumenstone.yaml \
+#       --roi_ckpt runs/lumenstone_s1/stage2/fold1/<timestamp>/stage2_best.pth
+# ─────────────────────────────────────────────────────────────────────────────
+
+data:
+  images_dir:    /srv/data1/data_repository/LumenStone/S1_v2_x05/imgs/train  # <<< CHANGE
+  masks_dir:     /srv/data1/data_repository/LumenStone/S1_v2_x05/masks/train  # <<< CHANGE
+  processed_dir: /srv/data1/data_repository/LumenStone/S1_v2_x05/processed
+  patches_dir:   /srv/data1/data_repository/LumenStone/S1_v2_x05/patches
+  splits_json:   /srv/data1/data_repository/LumenStone/S1_v2_x05/patches/fold_splits.json
+  fold:          1
+  n_folds:       5
+  cls:           all
+  crop_size:     256
+  patch_size:    512
+  stride:        256
+  min_fg_ratio:  0.05
+  label_map:
+    chalcopyrite: [1]
+    galena:       [2]
+    bornite:      [4]
+    pyrite:       [6]
+    sphalerite:   [8]
+    tenantite:    [11]
+
+model:
+  backbone:  efficientunet
+  roi_ckpt:  ""   # fill after training
+  proj_ckpt: ""
+
+stage2:
+  epochs:         50
+  batch_size:     16
+  num_workers:    4
+  lr:             4.0e-4
+  weight_decay:   0.0
+  device:         cuda:0  # <<< CHANGE if needed
+  checkpoint_dir: runs/lumenstone_s1/stage2/fold1
+  tensorboard:    true
+
+eval:
+  n_iter:      20
+  threshold:   0.5
+  batch_size:  16
+  num_workers: 4
+  device:      cuda:0  # <<< CHANGE if needed
+  results_dir: ""
+
+api:
+  host:      "0.0.0.0"
+  port:      8000
+  device:    cuda:0
+  crop_size: 256
