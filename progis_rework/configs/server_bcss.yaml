@@ -61,8 +61,8 @@ eval:
   threshold:   0.85
   batch_size:  16
   num_workers: 4
-  device:      cuda:1
-  results_dir: runs/stage2/fold1/20260323_2103/results_best
+  device:      cuda:0
+  results_dir: runs/simclr_proj/fold1/20260329_1528
 
 api:
   host:      "0.0.0.0"
