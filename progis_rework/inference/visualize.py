@@ -479,6 +479,7 @@ def make_animation(
     gt_per_class:         dict[str, np.ndarray],
     out_path:             Path,
     fps:                  int = 2,
+    scribble_radius:      int = 3,
 ) -> None:
     """
     GIF with 3 panels: GT (static) | combined prediction | accumulated scribbles.
@@ -501,7 +502,8 @@ def make_animation(
         return scribble_overlay(image_np,
                                 {cls: all_signals_per_class[cls][i]
                                  for cls in available_classes
-                                 if cls in all_signals_per_class})
+                                 if cls in all_signals_per_class},
+                                radius=scribble_radius)
 
     ax_gt.imshow(gt_frame)
     im_pred = ax_pred.imshow(_pred_frame(0))
@@ -599,6 +601,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='Output directory for PNG/GIF files.')
     p.add_argument('--animate',          action='store_true',
                    help='Also save a GIF animation.')
+    p.add_argument('--scribble_radius', type=int, default=3,
+                   help='Dilation radius for scribble display in pixels (default 3 → 7×7).')
     p.add_argument('--max_stroke', type=int, default=None,
                    help='Max stroke length in pixels per correction step '
                         '(None = unlimited). E.g. --max_stroke 50.')
@@ -728,6 +732,7 @@ def main() -> None:
             make_animation(
                 image_np, all_masks_per_class, all_signals_per_class,
                 available_classes, gt_per_class, anim_path,
+                scribble_radius=args.scribble_radius,
             )
 
     print(f"\nDone. Results → {out_dir}/")

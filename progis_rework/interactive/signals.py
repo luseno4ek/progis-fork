@@ -98,8 +98,11 @@ def _generate_guiding_signal_tensor(
     dist_np = distance_transform_edt(bm.cpu().numpy())
     dist    = torch.tensor(dist_np, dtype=torch.float32, device=binary_mask.device)
 
-    mean_d = float(dist.mean().cpu())
-    std_d  = float(dist.std().cpu())
+    # Compute mean/std only over foreground pixels — background has dist=0
+    # and would drag the mean down, making thresh near 0 → entire region passes.
+    fg_dist = dist[bm.bool()]
+    mean_d = float(fg_dist.mean().cpu())
+    std_d  = float(fg_dist.std().cpu())
 
     thresh = float(np.random.uniform(mean_d - std_d, mean_d + std_d))
     if thresh < 0:
