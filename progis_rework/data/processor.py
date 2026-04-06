@@ -20,7 +20,11 @@ Output layout produced by this processor:
 
 CLI usage
 ---------
-  # Full pipeline from raw PNG to patches:
+  # Recommended: drive everything from a YAML config (label_map included):
+  python -m progis_rework.data.processor all \\
+      --config progis_rework/configs/server_lumenstone.yaml
+
+  # Or pass paths explicitly (uses BCSS label_map by default):
   python -m progis_rework.data.processor all \\
       --images_dir data/raw/images \\
       --masks_dir  data/raw/masks \\
@@ -29,12 +33,11 @@ CLI usage
 
   # Step 1 only:
   python -m progis_rework.data.processor convert \\
-      --images_dir data/raw/images --masks_dir data/raw/masks \\
-      --processed_dir data/processed
+      --config progis_rework/configs/server_lumenstone.yaml
 
   # Step 2 only (processed_dir already exists):
   python -m progis_rework.data.processor patch \\
-      --processed_dir data/processed --patches_dir data/patches
+      --config progis_rework/configs/server_lumenstone.yaml
 
 Domain customisation
 --------------------
