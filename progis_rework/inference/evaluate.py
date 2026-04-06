@@ -42,7 +42,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from progis_rework.data.dataset import RoISegDataset, ALL_CLASSES
+from progis_rework.data.dataset import RoISegDataset
 from progis_rework.interactive.roi import (
     roi_crop_for_prototype,
     roi_crop_for_correction,
@@ -560,9 +560,13 @@ def main() -> None:
     )
 
     if cfg.cls == "all":
+        available_classes = sorted(
+            d.name for d in Path(cfg.patches_dir).iterdir()
+            if d.is_dir() and d.name != "all" and (d / "mask_npy").exists()
+        )
         if args.multiclass_proto:
             class_datasets: dict[str, RoISegDataset] = {}
-            for cls in ALL_CLASSES:
+            for cls in available_classes:
                 ds = RoISegDataset(
                     cfg.patches_dir, cfg.splits_json,
                     fold=cfg.fold, split="val", cls=cls, crop_size=cfg.crop_size,
@@ -573,7 +577,7 @@ def main() -> None:
             per_class_metrics = evaluate_multiclass_proto(model, class_datasets, cfg)
         else:
             per_class_metrics: dict[str, dict] = {}
-            for cls in ALL_CLASSES:
+            for cls in available_classes:
                 val_dataset = RoISegDataset(
                     cfg.patches_dir, cfg.splits_json,
                     fold=cfg.fold, split="val", cls=cls, crop_size=cfg.crop_size,
