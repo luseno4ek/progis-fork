@@ -596,7 +596,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='Path to fold_splits.json.')
     # Optional overrides
     p.add_argument('--backbone',    default=None,
-                   choices=['efficientunet', 'simclr'])
+                   choices=['efficientunet', 'simclr', 'petroscope_resnet34'])
     p.add_argument('--proj_ckpt',   default=None,
                    help='SimCLR projection head checkpoint (simclr only).')
     p.add_argument('--fold',        type=int, default=None)

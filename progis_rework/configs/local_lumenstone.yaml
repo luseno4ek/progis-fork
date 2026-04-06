@@ -24,7 +24,7 @@ data:
     tenantite:    [11]
 
 model:
-  backbone:  efficientunet
+  backbone:  petroscope_resnet34
   roi_ckpt:  ""
   proj_ckpt: ""
 

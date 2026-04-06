@@ -149,6 +149,57 @@ class SimCLRBackbone(FeatureExtractorBase):
         return self.extractor(x)   # [B, proj_channels, H, W]
 
 
+# ── Petroscope ResNet34 backbone ──────────────────────────────────────────────
+
+class PetroscopeResNetBackbone(FeatureExtractorBase):
+    """
+    Frozen ResNet34 encoder from petroscope (pretrained on LumenStone S1+S2)
+    + a small trainable 1×1 projection head (512 → proj_channels).
+
+    Architecture:
+      petroscope ResUNet(backbone="resnet34") → backbone_features (layer0..layer4)
+      layer4 output: [B, 512, H/32, W/32]
+      bilinear upsample → [B, 512, H, W]
+      1×1 conv → [B, proj_channels, H, W]
+
+    The encoder is frozen; only the projection head is trained (during Stage 2).
+    Input pixel values are expected in [0, 255] (same as other backbones).
+
+    Args:
+        proj_channels: output feature channels (default 32).
+        model_name:    key in petroscope MODEL_REGISTRY (default 's1s2_resnet34_x05').
+    """
+
+    def __init__(
+        self,
+        proj_channels: int = 32,
+        model_name:    str = "s1s2_resnet34_x05",
+    ):
+        super().__init__()
+        from petroscope.segmentation.models.resunet import ResUNet as PetroResUNet
+
+        petro = PetroResUNet.from_pretrained(model_name, device="cpu")
+        self.encoder = petro.model.backbone_features  # nn.ModuleDict: layer0..layer4
+
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+
+        self.proj = nn.Conv2d(512, proj_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        orig_hw = x.shape[2], x.shape[3]
+        x = x / 255.0                           # petroscope normalises to [0, 1]
+        x = self.encoder["layer0"](x)
+        x = self.encoder["layer1"](x)
+        x = self.encoder["layer2"](x)
+        x = self.encoder["layer3"](x)
+        x = self.encoder["layer4"](x)           # [B, 512, H/32, W/32]
+        x = nn.functional.interpolate(
+            x, size=orig_hw, mode="bilinear", align_corners=False,
+        )                                        # [B, 512, H, W]
+        return self.proj(x)                      # [B, proj_channels, H, W]
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def build_backbone(name: str, **kwargs) -> FeatureExtractorBase:
@@ -156,7 +207,7 @@ def build_backbone(name: str, **kwargs) -> FeatureExtractorBase:
     Instantiate a feature extractor backbone by name.
 
     Args:
-        name:   'efficientunet' or 'simclr'.
+        name:   'efficientunet', 'simclr', or 'petroscope_resnet34'.
         **kwargs: forwarded to the backbone constructor.
 
     Returns:
@@ -165,10 +216,12 @@ def build_backbone(name: str, **kwargs) -> FeatureExtractorBase:
     Example:
         backbone = build_backbone('efficientunet')
         backbone = build_backbone('simclr', proj_channels=32, proj_ckpt='/p.pth')
+        backbone = build_backbone('petroscope_resnet34', proj_channels=32)
     """
     registry: dict[str, type[FeatureExtractorBase]] = {
-        "efficientunet": EfficientUNetBackbone,
-        "simclr":        SimCLRBackbone,
+        "efficientunet":       EfficientUNetBackbone,
+        "simclr":              SimCLRBackbone,
+        "petroscope_resnet34": PetroscopeResNetBackbone,
     }
     if name not in registry:
         raise ValueError(

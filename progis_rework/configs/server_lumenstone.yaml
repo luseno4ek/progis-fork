@@ -14,6 +14,10 @@
 #       --config progis_rework/configs/server_lumenstone.yaml \
 #       --fold 2 --device cuda:1
 #
+# Projection head training (before Stage 2, trains proj head of petroscope backbone):
+#   python -m progis_rework.training.train_simclr_proj \
+#       --config progis_rework/configs/server_lumenstone.yaml
+#
 # Evaluation (NoI metric, n_iter=20):
 #   python -m progis_rework.inference.evaluate \
 #       --config progis_rework/configs/server_lumenstone.yaml \
@@ -42,9 +46,22 @@ data:
     tenantite:    [11]
 
 model:
-  backbone:  efficientunet
+  backbone:  petroscope_resnet34
   roi_ckpt:  ""   # fill after training
   proj_ckpt: ""
+
+simclr_proj:
+  backbone:       petroscope_resnet34
+  proj_channels:  32
+  epochs:         10
+  batch_size:     16
+  num_workers:    4
+  lr:             1.0e-3
+  weight_decay:   0.0
+  device:         cuda:0
+  checkpoint_dir: runs/lumenstone_s1/proj/fold1
+  tensorboard:    true
+  seed:           42
 
 stage2:
   epochs:         50

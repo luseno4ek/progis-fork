@@ -468,7 +468,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fold",       type=int)
     p.add_argument("--cls")
     p.add_argument("--crop_size",  type=int)
-    p.add_argument("--backbone",   choices=["efficientunet", "simclr"])
+    p.add_argument("--backbone",   choices=["efficientunet", "simclr", "petroscope_resnet34"])
     p.add_argument("--roi_ckpt",   help="Path to segment_part .pth checkpoint.")
     p.add_argument("--proj_ckpt",  help="SimCLR projection head checkpoint (simclr only).")
     p.add_argument("--n_iter",     type=int)

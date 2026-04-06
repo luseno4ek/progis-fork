@@ -67,6 +67,7 @@ class TrainConfig:
     crop_size:      int   = 256
 
     # Model
+    backbone:       str   = "simclr"
     proj_channels:  int   = 32
 
     # Hardware
@@ -157,10 +158,10 @@ def train(cfg: TrainConfig) -> None:
     device = torch.device(cfg.device)
 
     # ── Model ────────────────────────────────────────────────────────────────
-    from progis_rework.models.simclr_feature_extractor import SimCLRFeatureExtractor
-    extractor = SimCLRFeatureExtractor(proj_channels=cfg.proj_channels).to(device)
+    from progis_rework.models.backbones import build_backbone
+    extractor = build_backbone(cfg.backbone, proj_channels=cfg.proj_channels).to(device)
 
-    # Optimise only the projection head
+    # Optimise only the projection head (encoder is frozen in all backbones)
     optimizer = optim.Adam(
         extractor.proj.parameters(),
         lr=cfg.lr, weight_decay=cfg.weight_decay,
@@ -277,7 +278,7 @@ def train(cfg: TrainConfig) -> None:
 
     print(f"\nDone. Checkpoints: {run_dir}")
     print(f"Best val loss: {best_val_loss:.4f}")
-    print(f"Use with:  --backbone simclr --proj_ckpt {run_dir}/simclr_proj_best.pth")
+    print(f"Use with:  --backbone {cfg.backbone} --proj_ckpt {run_dir}/simclr_proj_best.pth")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -289,6 +290,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--config",          default=None,
                    help="Path to a YAML config file. Individual flags override YAML values.")
+    p.add_argument("--backbone",        choices=["simclr", "petroscope_resnet34"],
+                   help="Which backbone to train the projection head for.")
     p.add_argument("--patches_dir")
     p.add_argument("--splits_json")
     p.add_argument("--fold",            type=int)
@@ -319,6 +322,7 @@ def _cfg_from_yaml(path: str) -> dict:
         "fold":          d.get("fold",           1),
         "cls":           d.get("cls",            "all"),
         "crop_size":     d.get("crop_size",      256),
+        "backbone":      sp.get("backbone",      "simclr"),
         "proj_channels": sp.get("proj_channels", 32),
         "device":        sp.get("device",        "cpu"),
         "batch_size":    sp.get("batch_size",    16),
@@ -359,6 +363,7 @@ def main() -> None:
         fold           = get("fold",           int,   1),
         cls            = get("cls",            str,   "all"),
         crop_size      = get("crop_size",      int,   256),
+        backbone       = get("backbone",        str,   "simclr"),
         proj_channels  = get("proj_channels",  int,   32),
         device         = get("device",         str,   "cpu"),
         batch_size     = get("batch_size",     int,   16),
