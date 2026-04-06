@@ -86,7 +86,13 @@ class RoISegDataset(Dataset):
         fold_splits = load_fold_splits(splits_path)
         valid_stems = set(fold_splits[f"fold_{fold}"][split])
 
-        classes = ALL_CLASSES if cls == "all" else [cls]
+        if cls == "all":
+            classes = sorted(
+                d.name for d in self.patches_dir.iterdir()
+                if d.is_dir() and d.name != "all" and (d / "mask_npy").exists()
+            )
+        else:
+            classes = [cls]
 
         # Each item: (filename, class_name)
         self.items: list[tuple[str, str]] = []
