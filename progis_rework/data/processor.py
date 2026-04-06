@@ -424,12 +424,11 @@ def _build_parser():
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    parser.add_argument("--config", default=None,
-                       help="Path to a YAML config file (reads data.* section). "
-                            "Individual flags below override YAML values.")
-
     # ── shared args factory ──────────────────────────────────────────────
     def _add_common(p):
+        p.add_argument("--config", default=None,
+                       help="Path to a YAML config file (reads data.* section). "
+                            "Individual flags override YAML values.")
         p.add_argument("--processed_dir", default=None,
                        help="Directory for step-1 NPY outputs.")
         p.add_argument("--patches_dir",   default="data/patches",
