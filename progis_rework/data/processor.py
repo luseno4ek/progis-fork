@@ -431,12 +431,12 @@ def _build_parser():
                             "Individual flags override YAML values.")
         p.add_argument("--processed_dir", default=None,
                        help="Directory for step-1 NPY outputs.")
-        p.add_argument("--patches_dir",   default="data/patches",
+        p.add_argument("--patches_dir",   default=None,
                        help="Directory for step-2 patch outputs.")
-        p.add_argument("--n_folds",       type=int,   default=5)
-        p.add_argument("--patch_size",    type=int,   default=512)
-        p.add_argument("--stride",        type=int,   default=256)
-        p.add_argument("--min_fg_ratio",  type=float, default=0.05)
+        p.add_argument("--n_folds",       type=int,   default=None)
+        p.add_argument("--patch_size",    type=int,   default=None)
+        p.add_argument("--stride",        type=int,   default=None)
+        p.add_argument("--min_fg_ratio",  type=float, default=None)
         p.add_argument("--no_resize",     action="store_true",
                        help="Disable padding WSI to multiple-of-16.")
 
