@@ -550,7 +550,7 @@ def main() -> None:
     )
 
     backbone_kwargs = {}
-    if cfg.backbone == "simclr" and cfg.proj_ckpt:
+    if cfg.proj_ckpt:
         backbone_kwargs["proj_ckpt"] = cfg.proj_ckpt
 
     model = ProGISModel.from_checkpoint(

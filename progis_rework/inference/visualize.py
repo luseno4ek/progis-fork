@@ -666,7 +666,7 @@ def main() -> None:
     fold        = get("fold", int, 1)
 
     backbone_kwargs = {}
-    if backbone == 'simclr' and proj_ckpt:
+    if proj_ckpt:
         backbone_kwargs['proj_ckpt'] = proj_ckpt
 
     model = ProGISModel.from_checkpoint(

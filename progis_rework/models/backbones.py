@@ -174,6 +174,7 @@ class PetroscopeResNetBackbone(FeatureExtractorBase):
         self,
         proj_channels: int = 32,
         model_name:    str = "s1s2_resnet34_x05",
+        proj_ckpt:     Optional[str] = None,
     ):
         super().__init__()
         from petroscope.segmentation.models.resunet import ResUNet as PetroResUNet
@@ -185,6 +186,14 @@ class PetroscopeResNetBackbone(FeatureExtractorBase):
             p.requires_grad = False
 
         self.proj = nn.Conv2d(512, proj_channels, kernel_size=1)
+
+        if proj_ckpt is not None:
+            ckpt_path = Path(proj_ckpt)
+            if ckpt_path.exists():
+                self.proj.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
+                print(f"[PetroscopeResNetBackbone] Loaded projection head: {proj_ckpt}")
+            else:
+                print(f"[PetroscopeResNetBackbone] proj_ckpt not found, using random init: {proj_ckpt}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_hw = x.shape[2], x.shape[3]
