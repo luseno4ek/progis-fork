@@ -161,11 +161,9 @@ def train(cfg: TrainConfig) -> None:
     from progis_rework.models.backbones import build_backbone
     extractor = build_backbone(cfg.backbone, proj_channels=cfg.proj_channels).to(device)
 
-    # Optimise only the projection head (encoder is frozen in all backbones)
-    optimizer = optim.Adam(
-        extractor.proj.parameters(),
-        lr=cfg.lr, weight_decay=cfg.weight_decay,
-    )
+    # Optimise only trainable parameters (encoder is frozen in all backbones)
+    trainable = [p for p in extractor.parameters() if p.requires_grad]
+    optimizer = optim.Adam(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     # ── Data ─────────────────────────────────────────────────────────────────
     train_dataset = RoISegDataset(

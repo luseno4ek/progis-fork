@@ -28,6 +28,19 @@ model:
   roi_ckpt:  ""
   proj_ckpt: ""
 
+simclr_proj:
+  backbone:       petroscope_resnet34
+  proj_channels:  32
+  epochs:         1
+  batch_size:     2
+  num_workers:    0
+  lr:             1.0e-3
+  weight_decay:   0.0
+  device:         cpu
+  checkpoint_dir: runs/lumenstone_local/proj
+  tensorboard:    false
+  seed:           42
+
 stage2:
   epochs:         2
   batch_size:     2
