@@ -58,8 +58,8 @@ simclr_proj:
   num_workers:    4
   lr:             1.0e-3
   weight_decay:   0.0
-  device:         cuda:0
-  checkpoint_dir: runs/lumenstone_s1/proj/fold1
+  device:         cuda:3
+  checkpoint_dir: runs/lumenstone_s1_v2_x05/proj/fold1
   tensorboard:    true
   seed:           42
 
@@ -69,8 +69,8 @@ stage2:
   num_workers:    4
   lr:             4.0e-4
   weight_decay:   0.0
-  device:         cuda:0  # <<< CHANGE if needed
-  checkpoint_dir: runs/lumenstone_s1/stage2/fold1
+  device:         cuda:3  # <<< CHANGE if needed
+  checkpoint_dir: runs/lumenstone_s1_v2_x05/stage2/fold1
   tensorboard:    true
 
 eval:
@@ -78,11 +78,11 @@ eval:
   threshold:   0.5
   batch_size:  16
   num_workers: 4
-  device:      cuda:0  # <<< CHANGE if needed
+  device:      cuda:3  # <<< CHANGE if needed
   results_dir: ""
 
 api:
   host:      "0.0.0.0"
   port:      8000
-  device:    cuda:0
+  device:    cuda:3
   crop_size: 256

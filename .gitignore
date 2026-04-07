@@ -42,7 +42,7 @@ env/
 
 # Data files (очень важно - не коммитим датасеты!)
 *.npy
-*.png
+*.png !visualizations/git
 *.jpg
 *.jpeg
 *.tif
